@@ -4,11 +4,15 @@ import argparse
 import csv
 import json
 import os
+import sys
+from pathlib import Path
 from typing import Iterable, List, Optional
 
 import numpy as np
 
-from config import SEC_FILINGS_DIR
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from script.config import SEC_FILINGS_DIR
 from src.peerfirm.gemini_client import GeminiClient
 from src.peerfirm.index_io import load_index
 from src.peerfirm.item_loader import load_item_text

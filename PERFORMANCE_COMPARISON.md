@@ -1,4 +1,6 @@
-# Performance Comparison: Baseline → Phase 1 → Phase 1+2
+# RAG4PeerFirm Performance Comparison: Baseline → Phase 1 → Phase 1+2
+
+> Status: Active performance summary reference.
 
 ## Executive Summary
 

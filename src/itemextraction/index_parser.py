@@ -5,7 +5,7 @@ SEC EDGAR Full-Index Parser - Retrieves all companies from quarterly index files
 import requests
 import re
 from typing import List, Set, Dict, Tuple
-from config import SEC_BASE_URL, SEC_USER_AGENT, REQUEST_TIMEOUT, REQUEST_DELAY
+from script.config import SEC_BASE_URL, SEC_USER_AGENT, REQUEST_TIMEOUT, REQUEST_DELAY
 import time
 
 

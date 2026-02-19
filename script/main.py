@@ -1,5 +1,5 @@
 """
-ItemXtractor - Main script for extracting items from SEC EDGAR filings
+RAG4PeerFirm - Main script for extracting items from SEC EDGAR filings
 
 This script downloads SEC filings (10-K, 10-Q) and extracts specific items
 using the Table of Contents to locate each item within the filing.
@@ -8,24 +8,28 @@ using the Table of Contents to locate each item within the filing.
 import os
 import sys
 import threading
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Union
-from src.downloader import SECDownloader
-from src.parser import SECParser
-from src.extractor import ItemExtractor
-from src.structure_extractor import StructureExtractor
-from src.index_parser import SECIndexParser
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.itemextraction.downloader import SECDownloader
+from src.itemextraction.parser import SECParser
+from src.itemextraction.extractor import ItemExtractor
+from src.itemextraction.structure_extractor import StructureExtractor
+from src.itemextraction.index_parser import SECIndexParser
 from utils.logger import ExtractionLogger
 from utils.file_manager import FileManager
-from config import ITEMS_10K, ITEMS_10Q
+from script.config import ITEMS_10K, ITEMS_10Q
 
 
-class ItemXtractor:
+class RAG4PeerFirmExtractor:
     """Main class for extracting items from SEC EDGAR filings"""
     
     def __init__(self, base_dir: str = "sec_filings", log_dir: str = "logs"):
         """
-        Initialize ItemXtractor
+        Initialize RAG4PeerFirmExtractor
         
         Args:
             base_dir: Base directory for storing SEC filings
@@ -314,19 +318,19 @@ def main():
         epilog="""
 Examples:
   # Extract all items from Apple's 2023 10-K
-  python main.py --ticker AAPL --filing 10-K --year 2023
+    python script/main.py --ticker AAPL --filing 10-K --year 2023
   
   # Extract specific items from Microsoft's 2022 and 2023 10-K
-  python main.py --ticker MSFT --filing 10-K --years 2022 2023 --items 1 1A 7
+    python script/main.py --ticker MSFT --filing 10-K --years 2022 2023 --items 1 1A 7
   
   # Extract from multiple companies
-  python main.py --tickers AAPL MSFT GOOGL --filing 10-K --year 2023
+    python script/main.py --tickers AAPL MSFT GOOGL --filing 10-K --year 2023
   
   # Use CIK instead of ticker
-  python main.py --cik 0000320193 --filing 10-K --year 2023
+    python script/main.py --cik 0000320193 --filing 10-K --year 2023
   
   # Download ALL companies for specific years (no ticker/CIK specified)
-  python main.py --filing 10-K --years 2023 2024 2025
+    python script/main.py --filing 10-K --years 2023 2024 2025
         """
     )
     
@@ -407,7 +411,7 @@ Examples:
         print("\nStarting extraction...\n")
     
     # Create extractor
-    extractor = ItemXtractor(base_dir=args.output_dir, log_dir=args.log_dir)
+    extractor = RAG4PeerFirmExtractor(base_dir=args.output_dir, log_dir=args.log_dir)
     
     # Run extraction (includes automatic structure extraction)
     extractor.extract(
@@ -421,3 +425,7 @@ Examples:
 
 if __name__ == "__main__":
     main()
+
+
+# Backward compatibility alias
+ItemXtractor = RAG4PeerFirmExtractor

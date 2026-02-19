@@ -1,6 +1,6 @@
-# ItemXtractor
+# RAG4PeerFirm
 
-A professional Python tool for extracting specific items from SEC EDGAR 10-K and 10-Q filings. ItemXtractor automatically downloads filings, detects the Table of Contents, and extracts individual items into structured JSON format with both HTML and plain text content.
+A Python toolkit for extracting specific items from SEC EDGAR 10-K and 10-Q filings and running peer-firm similarity analysis. RAG4PeerFirm automatically downloads filings, detects the Table of Contents, and extracts individual items into structured JSON format with both HTML and plain text content.
 
 ## Features
 
@@ -9,13 +9,24 @@ A professional Python tool for extracting specific items from SEC EDGAR 10-K and
 - 🔄 **Batch Processing**: Extract from multiple companies, years, and filings in one command
 - 🌐 **Full-Index Download**: Download ALL companies' filings when no ticker/CIK specified (uses SEC quarterly index files)
 - 💾 **Skip Downloads**: Automatically skips re-downloading existing files
-- � **CSV Reports**: Excel-ready CSV reports and real-time extraction logs with O/X success indicators
+- 📈 **CSV Reports**: Excel-ready CSV reports and real-time extraction logs with O/X success indicators
 - 🎨 **Dual Format Output**: Each item saved as both HTML and plain text in JSON
 - 🔍 **CIK or Ticker**: Works with both CIK numbers and stock ticker symbols
 - ✓ **Amendment Filtering**: Automatically skips amended filings (10-K/A, 10-Q/A), selecting regular filings
 - 🛡️ **Robust Boundary Detection**: Handles edge cases with ID-based markers and HTML parsing variations
 - 📚 **Automatic Structure Extraction**: Detects and extracts nested heading-body pairs automatically during extraction
 - 🔐 **Safety Prompts**: Confirmation required for large-scale downloads (thousands of filings)
+
+## Documentation Map
+
+- `README.md` - Primary usage guide (setup, extraction, peer-firm workflows)
+- `FULL_INDEX_FEATURE.md` - Full-index workflow details and operational guidance
+- `STRUCTURE_EXTRACTION_ENHANCEMENT.md` - Structure extraction behavior and output format
+- `PERFORMANCE_COMPARISON.md` - Consolidated performance benchmark summary
+- `OPTIMIZATION_GUIDE.md` - Optimization backlog and implementation ideas
+- `IMPLEMENTATION_EVALUATION.md` - Archived implementation decision notes
+- `PERFORMANCE_ANALYSIS.md` - Archived baseline bottleneck analysis
+- `STRUCTURE_INTEGRATION.md` - Archived patch/integration draft notes
 
 ## Installation
 
@@ -28,8 +39,8 @@ A professional Python tool for extracting specific items from SEC EDGAR 10-K and
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/ItemXtractor.git
-cd ItemXtractor
+git clone https://github.com/yourusername/RAG4PeerFirm.git
+cd RAG4PeerFirm
 ```
 
 2. Install required packages:
@@ -37,9 +48,9 @@ cd ItemXtractor
 pip install -r requirements.txt
 ```
 
-3. **Important**: Update the User-Agent in `config.py`:
+3. **Important**: Update the User-Agent in `script/config.py`:
 ```python
-SEC_USER_AGENT = "ItemXtractor/1.0 (Research Tool; your.email@domain.com)"
+SEC_USER_AGENT = "RAG4PeerFirm/1.0 (Research Tool; your.email@domain.com)"
 ```
 The SEC requires a valid email in the User-Agent header.
 
@@ -49,26 +60,26 @@ The SEC requires a valid email in the User-Agent header.
 
 Extract all items from Apple's 2023 10-K:
 ```bash
-python main.py --ticker AAPL --filing 10-K --year 2023
+python script/main.py --ticker AAPL --filing 10-K --year 2023
 ```
 
 Extract specific items (Risk Factors and MD&A) from Microsoft's 2023 10-K:
 ```bash
-python main.py --ticker MSFT --filing 10-K --year 2023 --items 1A 7
+python script/main.py --ticker MSFT --filing 10-K --year 2023 --items 1A 7
 ```
 
 Extract from multiple companies and years:
 ```bash
-python main.py --tickers AAPL MSFT GOOGL --filing 10-K --years 2022 2023
+python script/main.py --tickers AAPL MSFT GOOGL --filing 10-K --years 2022 2023
 ```
 
 Download ALL companies for specific years (no ticker/CIK specified):
 ```bash
-python main.py --filing 10-K --years 2023 2024 2025
+python script/main.py --filing 10-K --years 2023 2024 2025
 ```
 ⚠️ **Warning**: This will download thousands of filings and may take several hours.
 
-### Peer Firm Analysis (peerfirm.py)
+### Peer Firm Analysis (`script/peerfirm.py`)
 
 Identify similar peer companies using Gemini AI generative models. Two methods are available:
 
@@ -80,7 +91,7 @@ Uses the hierarchical structure from extracted items to generate peer recommenda
 $env:GEMINI_API_KEY="your-api-key-here"
 
 # Find 5 peers based on Item 1 (Business) disclosure
-python peerfirm.py --method headbody --k 5 --cik 0000001750 --year 2024 --item 1 --output ./output/peerfirm
+python script/peerfirm.py --method headbody --k 5 --cik 0000001750 --year 2024 --item 1 --output ./output/peerfirm
 ```
 
 This method:
@@ -98,21 +109,21 @@ Builds embeddings for all companies and returns top-k similar companies:
 
 ```bash
 # Build vector index for Item 1C (Cybersecurity)
-python peerfirm_index.py --year 2024 --item 1C --filing 10-K --index-dir ./vector_db/peerfirm
+python script/peerfirm_index.py --year 2024 --item 1C --filing 10-K --index-dir ./vector_db/peerfirm
 
 # Query the index
-python peerfirm.py --method vdb --k 5 --cik 0000001750 --year 2024 --item 1C --output ./output/peerfirm
+python script/peerfirm.py --method vdb --k 5 --cik 0000001750 --year 2024 --item 1C --output ./output/peerfirm
 ```
 
 **Build indexes for all items:**
 ```bash
 # Build one index per item (e.g., 1, 1A, 1B, 1C, 7, ...)
-python peerfirm_index.py --year 2024 --filing 10-K --index-dir ./vector_db/peerfirm
+python script/peerfirm_index.py --year 2024 --filing 10-K --index-dir ./vector_db/peerfirm
 ```
 
 **Batch embeddings (reduce API calls):**
 ```bash
-python peerfirm_index.py --year 2024 --item 1C --filing 10-K --index-dir ./vector_db/peerfirm --batch-size 20
+python script/peerfirm_index.py --year 2024 --item 1C --filing 10-K --index-dir ./vector_db/peerfirm --batch-size 20
 ```
 
 Default batch size is `10`. If batch embedding fails, the script automatically falls back to single-item embedding calls.
@@ -134,10 +145,10 @@ vector_db/peerfirm/
 **Output files (vdb method):**
 - `{CIK}_{YEAR}_{ITEM}_{K}_vdb_matches.txt` - Top-k most similar companies by cosine distance
 
-#### peerfirm.py Command Options
+#### `script/peerfirm.py` Command Options
 
 ```bash
-python peerfirm.py --method {headbody|vdb} --k 5 --cik CIK --year YEAR --item ITEM [--output DIR] [--save-prompt] [--keywords KEYWORDS]
+python script/peerfirm.py --method {headbody|vdb} --k 5 --cik CIK --year YEAR --item ITEM [--output DIR] [--save-prompt] [--keywords KEYWORDS]
 ```
 
 **Arguments:**
@@ -152,7 +163,7 @@ python peerfirm.py --method {headbody|vdb} --k 5 --cik CIK --year YEAR --item IT
 
 **Example with custom keywords:**
 ```bash
-python peerfirm.py --method headbody --k 5 --cik 0000001750 --year 2024 --item 1 --output ./output/peerfirm --save-prompt --keywords "aircraft maintenance, defense contracting, supply chain"
+python script/peerfirm.py --method headbody --k 5 --cik 0000001750 --year 2024 --item 1 --output ./output/peerfirm --save-prompt --keywords "aircraft maintenance, defense contracting, supply chain"
 ```
 
 **Environment variables:**
@@ -166,7 +177,7 @@ python peerfirm.py --method headbody --k 5 --cik 0000001750 --year 2024 --item 1
 **Set environment variable (Windows PowerShell):**
 ```powershell
 $env:GEMINI_API_KEY="your-api-key-here"
-python peerfirm.py --method headbody --k 5 --cik 0000001750 --year 2024 --item 1 --output ./output/peerfirm
+python script/peerfirm.py --method headbody --k 5 --cik 0000001750 --year 2024 --item 1 --output ./output/peerfirm
 ```
 
 #### Choosing a Method
@@ -193,10 +204,10 @@ python peerfirm.py --method headbody --k 5 --cik 0000001750 --year 2024 --item 1
 ### Python API Usage
 
 ```python
-from main import ItemXtractor
+from script.main import RAG4PeerFirmExtractor
 
 # Create extractor instance
-extractor = ItemXtractor()
+extractor = RAG4PeerFirmExtractor()
 
 # Extract all items from a filing
 extractor.extract(
@@ -251,7 +262,7 @@ Structure extraction happens **automatically** during item extraction. Each extr
 
 **Example extraction:**
 ```bash
-python main.py --ticker AAPL --filing 10-K --year 2022
+python script/main.py --ticker AAPL --filing 10-K --year 2022
 ```
 
 **Output files (in `sec_filings/0000320193/2022/10-K/items/`):**
@@ -362,7 +373,7 @@ python main.py --ticker AAPL --filing 10-K --year 2022
 
 ## Full-Index Download (All Companies)
 
-When no `--ticker` or `--cik` is specified, ItemXtractor automatically downloads filings for **ALL companies** from SEC EDGAR using quarterly full-index files.
+When no `--ticker` or `--cik` is specified, RAG4PeerFirm automatically downloads filings for **ALL companies** from SEC EDGAR using quarterly full-index files.
 
 ### How It Works
 
@@ -375,13 +386,13 @@ When no `--ticker` or `--cik` is specified, ItemXtractor automatically downloads
 
 ```bash
 # Download ALL 10-K filings for 2024 (will prompt for confirmation)
-python main.py --filing 10-K --year 2024
+python script/main.py --filing 10-K --year 2024
 
 # Download ALL companies across multiple years
-python main.py --filing 10-K --years 2023 2024 2025
+python script/main.py --filing 10-K --years 2023 2024 2025
 
 # Download all companies but extract specific items only
-python main.py --filing 10-K --year 2024 --items 1 1A 7
+python script/main.py --filing 10-K --year 2024 --items 1 1A 7
 ```
 
 ### Expected Volume & Time
@@ -430,7 +441,7 @@ See [FULL_INDEX_FEATURE.md](FULL_INDEX_FEATURE.md) for detailed documentation.
 
 ## CSV Reports and Logs
 
-ItemXtractor generates **Excel-ready CSV files** for easy analysis and monitoring:
+RAG4PeerFirm generates **Excel-ready CSV files** for easy analysis and monitoring:
 
 ### Extraction Log (Real-time)
 - **File**: `logs/extraction_{timestamp}.csv`
@@ -481,12 +492,12 @@ df = pd.read_csv('logs/extraction_20240115_103045.csv', skiprows=1)
 failures = df[(df == 'X').any(axis=1)]
 ```
 
-## Filing Statistics Report (stat.py)
+## Filing Statistics Report (`script/stat.py`)
 
 Generate a **comprehensive descriptive statistics report** from downloaded filings and extracted structures:
 
 ```bash
-python stat.py --folder sec_filings
+python script/stat.py --folder sec_filings
 ```
 
 **Output:**
@@ -507,7 +518,7 @@ python stat.py --folder sec_filings
 ## Command Line Options
 
 ```
-usage: main.py [-h] [--ticker TICKERS [TICKERS ...]] [--cik CIKS [CIKS ...]]
+usage: script/main.py [-h] [--ticker TICKERS [TICKERS ...]] [--cik CIKS [CIKS ...]]
                --filing {10-K,10-Q} [{10-K,10-Q} ...]
                --year YEARS [YEARS ...]
                [--items ITEMS [ITEMS ...]]
@@ -537,7 +548,7 @@ optional arguments:
 
 ## Logging and Reports
 
-ItemXtractor generates comprehensive logs for every extraction session:
+RAG4PeerFirm generates comprehensive logs for every extraction session:
 
 - **Console logs**: Real-time progress output
 - **Log files**: Detailed logs saved in `logs/extraction_YYYYMMDD_HHMMSS.log`
@@ -555,22 +566,6 @@ Each JSON report includes:
   - Successfully extracted items
   - Any errors encountered
   - Processing time
-
-## Usage Examples
-
-For programmatic use, import and instantiate the `ItemXtractor` class:
-
-```python
-from main import ItemXtractor
-
-extractor = ItemXtractor()
-extractor.extract(
-    cik_tickers="AAPL",
-    filing_types="10-K",
-    years=2022,
-    items=["1", "1A", "7"]
-)
-```
 
 ## How It Works
 
@@ -597,7 +592,7 @@ extractor.extract(
 ## SEC API Guidelines
 
 This tool follows SEC EDGAR's API guidelines:
-- Maximum 10 requests per second (configurable in `config.py`)
+- Maximum 10 requests per second (configurable in `script/config.py`)
 - Declares a User-Agent header with contact information
 - Respects robots.txt
 

@@ -2,12 +2,16 @@
 
 import argparse
 import os
+import sys
 from datetime import datetime
+from pathlib import Path
 from typing import List
 
 import numpy as np
 
-from config import ITEMS_10K, ITEMS_10Q, SEC_FILINGS_DIR
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from script.config import ITEMS_10K, ITEMS_10Q, SEC_FILINGS_DIR
 from src.peerfirm.gemini_client import GeminiClient
 from src.peerfirm.index_io import iter_indexable_items, save_index
 from src.peerfirm.item_loader import load_item_text

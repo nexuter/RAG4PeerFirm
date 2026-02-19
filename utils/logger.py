@@ -9,7 +9,7 @@ import os
 import threading
 from datetime import datetime
 from typing import Dict, Any, List
-from config import LOGS_DIR, LOG_FORMAT, LOG_DATE_FORMAT, ITEMS_10K, ITEMS_10Q
+from script.config import LOGS_DIR, LOG_FORMAT, LOG_DATE_FORMAT, ITEMS_10K, ITEMS_10Q
 
 
 class ExtractionLogger:
@@ -26,7 +26,7 @@ class ExtractionLogger:
         os.makedirs(log_dir, exist_ok=True)
         
         # Setup logger
-        self.logger = logging.getLogger('ItemXtractor')
+        self.logger = logging.getLogger('RAG4PeerFirm')
         self.logger.setLevel(logging.INFO)
         
         # Console handler

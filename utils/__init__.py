@@ -1,5 +1,5 @@
 """
-Utility modules for ItemXtractor
+Utility modules for RAG4PeerFirm
 """
 
 from .logger import ExtractionLogger

@@ -1,4 +1,6 @@
-# Optimization Implementation Guide
+# RAG4PeerFirm Optimization Implementation Guide
+
+> Status: Active optimization backlog and implementation notes.
 
 ## Quick Win #1: Use lxml Parser (1.5-2x speedup)
 
@@ -221,7 +223,7 @@ class ItemExtractor:
 
 ## Medium Priority: Parallel Item Extraction (10-15x speedup)
 
-### Current Code (in main.py):
+### Current Code (in script/main.py):
 ```python
 def process_filing(self, cik_ticker, year, filing_type, items=None):
     # ... parse TOC ...
@@ -238,7 +240,7 @@ def process_filing(self, cik_ticker, year, filing_type, items=None):
 from concurrent.futures import ThreadPoolExecutor
 import threading
 
-class ItemXtractor:
+class RAG4PeerFirmExtractor:
     def __init__(self, base_dir="sec_filings", log_dir="logs"):
         # ... existing init ...
         self.extractor_lock = threading.Lock()  # For logging
@@ -328,7 +330,7 @@ class ItemXtractor:
 
 ### Phase 2: Parallel (1-2 hours, expect 10-15x additional for extraction)
 ```
-1. Add ThreadPoolExecutor to main.py
+1. Add ThreadPoolExecutor to script/main.py
 2. Create worker method _extract_and_save_item()
 3. Add thread-safe logging with lock
 4. Test with various max_workers values (2, 4, 8)

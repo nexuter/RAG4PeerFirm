@@ -13,8 +13,8 @@ import sys
 import re
 
 # Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent))
-from config import ITEMS_10K, ITEMS_10Q
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from script.config import ITEMS_10K, ITEMS_10Q
 
 class FilingAnalyzer:
     """Analyzes SEC filings and generates statistics report"""

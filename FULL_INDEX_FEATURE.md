@@ -1,4 +1,6 @@
-# Full-Index Download Feature - Implementation Summary
+# RAG4PeerFirm Full-Index Download Guide
+
+> Status: Active reference for full-index (all-companies) extraction workflow.
 
 ## Overview
 Added capability to download ALL companies' filings from SEC EDGAR when no `--tickers` or `--ciks` are specified. Uses SEC's quarterly full-index files to discover all companies.
@@ -16,26 +18,23 @@ Added capability to download ALL companies' filings from SEC EDGAR when no `--ti
 
 #### Download ALL 10-K filings for 2024
 ```bash
-python main.py --filing 10-K --year 2024
+python script/main.py --filing 10-K --year 2024
 ```
 
 #### Download ALL 10-K filings for multiple years
 ```bash
-python main.py --filing 10-K --years 2023 2024 2025
+python script/main.py --filing 10-K --years 2023 2024 2025
 ```
 
 #### Download ALL companies but specific items only
 ```bash
-python main.py --filing 10-K --year 2024 --items 1 1A 7
+python script/main.py --filing 10-K --year 2024 --items 1 1A 7
 ```
 
 #### Extract structure from all companies
 ```bash
-# Step 1: Download all filings
-python main.py --filing 10-K --year 2024
-
-# Step 2: Extract structure
-python main.py --filing 10-K --year 2024 --extract-structure
+# Structure files are generated automatically during extraction
+python script/main.py --filing 10-K --year 2024
 ```
 
 ## Scale & Performance
@@ -87,7 +86,7 @@ Do you want to continue? (yes/no):
 
 ## Implementation Files
 
-### New File: `src/index_parser.py` (212 lines)
+### New File: `src/itemextraction/index_parser.py` (212 lines)
 **Classes:**
 - `SECIndexParser`: Main class for parsing full-index files
 
@@ -98,7 +97,7 @@ Do you want to continue? (yes/no):
 - `get_ciks_for_filing(filing_type, years)`: Returns unique CIKs
 - `estimate_filing_count(filing_type, years)`: Estimates volume
 
-### Modified: `main.py`
+### Modified: `script/main.py`
 **Changes:**
 1. Import `SECIndexParser`
 2. Initialize `self.index_parser` in `__init__`
@@ -172,19 +171,19 @@ Apple Inc.|10-K|0000320193|2024-11-01|edgar/data/320193/0000320193-24-000123.txt
 ### For Testing
 ```bash
 # Test with single year first
-python main.py --filing 10-K --year 2024 --items 1
+python script/main.py --filing 10-K --year 2024 --items 1
 
 # Then scale to multiple years
-python main.py --filing 10-K --years 2023 2024 2025
+python script/main.py --filing 10-K --years 2023 2024 2025
 ```
 
 ### For Production
 ```bash
 # Use high worker count for parallel processing
-python main.py --filing 10-K --year 2024 --workers 16
+python script/main.py --filing 10-K --year 2024 --workers 16
 
-# Separate structure extraction after download
-python main.py --filing 10-K --year 2024 --extract-structure --workers 16
+# Structure extraction is automatic; use workers for parallel filing processing
+python script/main.py --filing 10-K --year 2024 --workers 16
 ```
 
 ## Limitations

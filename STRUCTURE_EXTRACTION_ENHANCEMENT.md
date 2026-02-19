@@ -1,4 +1,6 @@
-# Structure Extraction Enhancement Summary
+# RAG4PeerFirm Structure Extraction Enhancement Summary
+
+> Status: Active behavior reference for structure extraction output.
 
 ## Overview
 Enhanced the structure extraction feature to automatically detect and build hierarchical (nested) heading-body pair structures from within extracted SEC filing items.
@@ -66,21 +68,21 @@ After enhancement (nested structure):
 ## Technical Changes
 
 ### Modified Files
-- `src/structure_extractor.py`: Complete refactor of extraction logic
+- `src/itemextraction/structure_extractor.py`: Complete refactor of extraction logic
   - `_collect_elements()`: New method to gather all elements with their properties
   - `_get_heading_info()`: New method to detect headings by styling
   - `_is_body_content()`: New method to identify body paragraphs
   - `_build_hierarchy()`: New method to create nested structure from flat list
   - Removed old flat extraction methods
 
-- `main.py`: No changes (integration remains the same)
+- `script/main.py`: No changes (integration remains the same)
 - `README.md`: Added documentation section on structure extraction
 
 ## Usage
 
-Extract structures from already extracted items:
+Extract filings and structures in one pass (structure files are generated automatically):
 ```bash
-python main.py --ticker AAPL --filing 10-K --year 2022 --extract-structure
+python script/main.py --ticker AAPL --filing 10-K --year 2022
 ```
 
 This creates files like: `AAPL_2022_10-K_item1_xtr.json` with nested structure.

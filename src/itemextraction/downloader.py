@@ -7,7 +7,7 @@ import time
 import re
 from typing import Optional, Tuple
 from bs4 import BeautifulSoup
-from config import (
+from script.config import (
     SEC_BASE_URL, SEC_USER_AGENT, REQUEST_TIMEOUT, REQUEST_DELAY
 )
 

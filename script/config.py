@@ -1,5 +1,5 @@
 """
-Configuration settings for ItemXtractor
+Configuration settings for RAG4PeerFirm
 """
 
 import os
@@ -7,7 +7,7 @@ import os
 # SEC EDGAR API Settings
 SEC_BASE_URL = "https://www.sec.gov"
 SEC_ARCHIVES_URL = f"{SEC_BASE_URL}/cgi-bin/browse-edgar"
-SEC_USER_AGENT = "ItemXtractor/1.0 (Research Tool; yourname@yourdomain.com)"  # IMPORTANT: Update with your email
+SEC_USER_AGENT = "RAG4PeerFirm/1.0 (Research Tool; yourname@yourdomain.com)"  # IMPORTANT: Update with your email
 
 # File Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
