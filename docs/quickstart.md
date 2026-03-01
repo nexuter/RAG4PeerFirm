@@ -29,8 +29,8 @@ python script/vdbbuilder.py \
 Expected output:
 
 ```text
-vector_db/scope=all/units.parquet
-vector_db/scope=all/item_vectors.parquet
+vector_db/scope=all/units/units_2024.parquet
+vector_db/scope=all/item_vectors/item_vectors_2024.parquet
 vector_db/scope=all/vectors/pooled/...
 vector_db/scope=all/vectors/residual/...
 ```

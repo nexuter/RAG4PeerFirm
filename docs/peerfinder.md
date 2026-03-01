@@ -17,10 +17,10 @@ It supports scope-aware querying (`all`, `heading`, `body`) and optional precomp
 From `vdbbuilder` output:
 
 ```text
-<vdb_dir>/scope=<scope>/item_vectors.parquet
+<vdb_dir>/scope=<scope>/item_vectors/item_vectors_<YEAR>.parquet
 <vdb_dir>/scope=<scope>/vectors/pooled/item=<ITEM>/year=<YEAR>.npz
 <vdb_dir>/scope=<scope>/vectors/residual/item=<ITEM>/year=<YEAR>.npz   # orthogonal method
-<vdb_dir>/scope=<scope>/units.parquet                                   # gemini method
+<vdb_dir>/scope=<scope>/units/units_<YEAR>.parquet                      # gemini method
 ```
 
 If `scope=<scope>` folder does not exist, module falls back to `<vdb_dir>` for backward compatibility.
@@ -160,7 +160,7 @@ Output fields:
 
 For each requested item:
 
-1. Build text per firm by joining unit text from `units.parquet`.
+1. Build text per firm by joining unit text from `units/units_<YEAR>.parquet`.
 2. Send focal text + peer text to Gemini prompt.
 3. Parse JSON response:
    - `score` in `[0,1]`

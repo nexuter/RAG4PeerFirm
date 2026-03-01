@@ -44,8 +44,8 @@ Outputs are scope-specific:
 ```text
 <out_dir>/
   scope=all|heading|body/
-    units.parquet
-    item_vectors.parquet
+    units/units_<YEAR>.parquet
+    item_vectors/item_vectors_<YEAR>.parquet
     vectors/
       pooled/item=<ITEM>/year=<YEAR>.npz
       residual/item=<ITEM>/year=<YEAR>.npz

@@ -232,12 +232,18 @@ def item_candidates(
     return cand_ids
 
 
-def load_item_vectors(vdb_dir: Path) -> pd.DataFrame:
-    """Load item vector metadata table to validate vdb directory completeness."""
-    parquet_path = vdb_dir / "item_vectors.parquet"
-    if parquet_path.exists():
-        return pd.read_parquet(parquet_path)
-    raise FileNotFoundError(f"Missing {parquet_path}")
+def load_item_vectors(vdb_dir: Path, year: int) -> pd.DataFrame:
+    """Load item-vector metadata for requested year (new per-year layout with legacy fallback)."""
+    year_path = vdb_dir / "item_vectors" / f"item_vectors_{int(year)}.parquet"
+    if year_path.exists():
+        return pd.read_parquet(year_path)
+    legacy_path = vdb_dir / "item_vectors.parquet"
+    if legacy_path.exists():
+        df = pd.read_parquet(legacy_path)
+        if "year" in df.columns:
+            return df[df["year"] == int(year)].copy()
+        return df
+    raise FileNotFoundError(f"Missing {year_path} (and legacy fallback {legacy_path})")
 
 
 def load_unit_text_by_firm(vdb_dir: Path, year: int, item_id: str, scope: str) -> Dict[str, str]:
@@ -246,9 +252,11 @@ def load_unit_text_by_firm(vdb_dir: Path, year: int, item_id: str, scope: str) -
 
     Text is assembled in `unit_id` order and used by LLM-based peer comparison.
     """
-    units_path = vdb_dir / "units.parquet"
+    year_path = vdb_dir / "units" / f"units_{int(year)}.parquet"
+    legacy_path = vdb_dir / "units.parquet"
+    units_path = year_path if year_path.exists() else legacy_path
     if not units_path.exists():
-        raise FileNotFoundError(f"Missing {units_path}")
+        raise FileNotFoundError(f"Missing {year_path} (and legacy fallback {legacy_path})")
 
     units = pd.read_parquet(units_path)
     if units.empty:
@@ -493,7 +501,7 @@ def run_peerfinder(
     """
     _warn_if_gpu_available_without_faiss_gpu(faiss_use_gpu)
     active_vdb_dir = _resolve_scope_dir(vdb_dir, scope)
-    _ = load_item_vectors(active_vdb_dir)
+    _ = load_item_vectors(active_vdb_dir, year=year)
     selected_items = sorted({str(item_id).upper() for item_id in items if str(item_id).strip()})
 
     rows: List[Dict[str, object]] = []

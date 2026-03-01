@@ -53,3 +53,4 @@ Thumbs.db
 .coverage
 htmlcov/
 tests/
+vector_db_test/

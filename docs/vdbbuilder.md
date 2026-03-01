@@ -106,7 +106,7 @@ All under:
 <out_dir>/scope=<scope>/
 ```
 
-### `units.parquet`
+### `units/units_<YEAR>.parquet`
 
 One row per unit:
 
@@ -116,7 +116,7 @@ One row per unit:
 - `embedding` (JSON-serialized vector)
 - `source_path`, `scope`
 
-### `item_vectors.parquet`
+### `item_vectors/item_vectors_<YEAR>.parquet`
 
 One row per `(firm_id, year, item_id)`:
 

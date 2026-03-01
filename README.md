@@ -96,8 +96,8 @@ python script/vdbbuilder.py --out_dir vector_db --embedder local --no-faiss-gpu
 
 Main outputs:
 
-- `vector_db/scope=<scope>/units.parquet`
-- `vector_db/scope=<scope>/item_vectors.parquet`
+- `vector_db/scope=<scope>/units/units_<YEAR>.parquet`
+- `vector_db/scope=<scope>/item_vectors/item_vectors_<YEAR>.parquet`
 - `vector_db/scope=<scope>/vectors/pooled/item=<ITEM>/year=<YEAR>.npz`
 - `vector_db/scope=<scope>/vectors/residual/item=<ITEM>/year=<YEAR>.npz`
 - `vector_db/scope=<scope>/indices/item=<ITEM>/year=<YEAR>/...` (if FAISS build is enabled)

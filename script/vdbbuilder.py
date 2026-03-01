@@ -20,8 +20,8 @@ Core pipeline design:
 6. Persist tables and matrices; optionally write FAISS indices.
 
 Outputs under `--out_dir`:
-- `units.parquet`: one row per unit with metadata and unit embedding.
-- `item_vectors.parquet`: one row per firm-year-item with pooled and residual stats.
+- `units/units_<YEAR>.parquet`: one row per unit with metadata and unit embedding.
+- `item_vectors/item_vectors_<YEAR>.parquet`: one row per firm-year-item with pooled and residual stats.
 - `vectors/pooled/item=<ITEM>/year=<YEAR>.npz`: normalized pooled vectors + ids.
 - `vectors/residual/item=<ITEM>/year=<YEAR>.npz`: normalized residual vectors + ids + mask.
 - `indices/...` (optional): FAISS inner-product indices for pooled/residual vectors.
@@ -476,8 +476,8 @@ def build(cfg: BuildConfig) -> None:
     - `cfg` controls paths, embedding backend, chunking, decomposition, and FAISS options.
 
     Main outputs:
-    - `units.parquet`
-    - `item_vectors.parquet`
+    - `units/units_<YEAR>.parquet`
+    - `item_vectors/item_vectors_<YEAR>.parquet`
     - pooled/residual `.npz` matrices per item-year
     - optional FAISS index files per item-year
     """
@@ -669,13 +669,20 @@ def build(cfg: BuildConfig) -> None:
                 faiss.write_index(_faiss_to_cpu(residual_index), str(idx_dir / "residual.faiss"))
                 (idx_dir / "residual_ids.json").write_text(json.dumps(firm_ids[valid].tolist()), encoding="utf-8")
 
-    units_out = scoped_out_dir / "units.parquet"
-    items_out = scoped_out_dir / "item_vectors.parquet"
-    units_df.to_parquet(units_out, index=False)
-    items_df.drop(columns=["_row_idx"]).to_parquet(items_out, index=False)
+    units_dir = scoped_out_dir / "units"
+    item_vectors_dir = scoped_out_dir / "item_vectors"
+    units_dir.mkdir(parents=True, exist_ok=True)
+    item_vectors_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[DONE] Wrote: {units_out}")
-    print(f"[DONE] Wrote: {items_out}")
+    items_noidx = items_df.drop(columns=["_row_idx"])
+    out_years = sorted(set(int(y) for y in items_noidx["year"].tolist()))
+    for y in out_years:
+        units_out = units_dir / f"units_{y}.parquet"
+        items_out = item_vectors_dir / f"item_vectors_{y}.parquet"
+        units_df[units_df["year"] == y].to_parquet(units_out, index=False)
+        items_noidx[items_noidx["year"] == y].to_parquet(items_out, index=False)
+        print(f"[DONE] Wrote: {units_out}")
+        print(f"[DONE] Wrote: {items_out}")
 
 
 def main() -> None:
