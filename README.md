@@ -1,30 +1,32 @@
-﻿# RAG4PeerFirm
+# RAG4PeerFirm
 
-SEC filing pipeline for download, extraction, vector-db build, and peer-firm matching.
+Pipeline for SEC filing download, item extraction, vector building, and peer-firm matching.
 
-## Project Layout
+## Modules
 
-- `script/downloader.py`: download filings from SEC EDGAR (supports ticker/CIK filters)
-- `script/extractor.py`: extract filing items and structure JSON from downloaded filings
-- `script/vdbbuilder.py`: build unit/item vectors, residual vectors, and FAISS indices
-- `script/peerfinder.py`: run common-screen + specific-rank peer matching
-- `utils/downloader.py`: SEC downloader client
-- `utils/index_parser.py`: SEC full-index parser
-- `utils/file_manager.py`: file IO helpers
-- `utils/parser.py`, `utils/extractor.py`, `utils/structure_extractor.py`: extraction internals
-- `utils/config.py`: shared constants
-- `tests/smoke_test.py`: lightweight compile/import smoke test
+- `script/downloader.py`
+  - Downloads SEC filings using ticker/CIK filters into `sec_filings/`.
+- `script/vdbbuilder.py`
+  - Builds unit and item embeddings from extracted filing JSON (`*_item.json` or `*_str.json` by scope).
+  - Produces pooled/residual vectors and optional FAISS indices.
+- `script/peerfinder.py`
+  - Finds item-level peers for a focal firm and year.
+  - Supports `orthogonal` and `cosine` similarity methods.
+  - Supports cached precomputed NxN similarity matrices.
+
+## Input Data Assumptions
+
+- Input format is JSON-only from extracted filing outputs.
+- Expected location pattern:
+  - `sec_filings/<firm_id>/<year>/<filing_type>/<firm_id>_<year>_<filing>_item.json`
+- Expected JSON keys:
+  - `toc_items`
+  - `items[item_id].text_content` (fallback to `html_content`)
 
 ## Install
 
 ```bash
 pip install -r requirements.txt
-```
-
-## Smoke Test
-
-```bash
-python tests/smoke_test.py
 ```
 
 ## 1) Download Filings
@@ -40,48 +42,127 @@ python script/downloader.py \
 Examples:
 
 ```bash
-# specific tickers
 python script/downloader.py --filing 10k --year 2024 --ticker AAPL MSFT --output_dir sec_filings --user_agent "RAG4PeerFirm/1.0 (your-email@example.com)"
-
-# specific CIKs
 python script/downloader.py --filing 10k --year 2024 --cik 0000320193 0000789019 --output_dir sec_filings --user_agent "RAG4PeerFirm/1.0 (your-email@example.com)"
 ```
 
-## 2) Extract Items and Structure
+## 2) Build Vector DB
 
-```bash
-python script/extractor.py \
-  --filing_dir sec_filings \
-  --filing 10-K \
-  --year 2024
-```
-
-## 3) Build Vector DB
+Default local embedder (deterministic and offline):
 
 ```bash
 python script/vdbbuilder.py \
   --filing_dir sec_filings \
   --out_dir vector_db \
   --filing 10-K \
+  --scope all \
   --embedder local
 ```
 
-OpenAI embeddings:
+OpenAI embedder:
 
 ```bash
 set OPENAI_API_KEY=...
-python script/vdbbuilder.py --filing_dir sec_filings --out_dir vector_db --filing 10-K --embedder openai
+python script/vdbbuilder.py \
+  --filing_dir sec_filings \
+  --out_dir vector_db \
+  --filing 10-K \
+  --scope all \
+  --embedder openai \
+  --embed_model text-embedding-3-large
 ```
 
-Outputs under `<out_dir>`:
+Scope options:
 
-- `units.parquet`
-- `item_vectors.parquet`
-- `vectors/pooled/item=*/year=*.npz`
-- `vectors/residual/item=*/year=*.npz`
-- `indices/item=*/year=*/pooled.faiss` (+ residual where available)
+- `--scope all`: use `*_item.json` and `items[item_id].text_content` (existing behavior)
+- `--scope heading`: use `*_str.json` and concatenate all `heading` values in each item structure
+- `--scope body`: use `*_str.json` and concatenate all `body` values in each item structure
 
-## 4) Find Peers
+Scope-specific outputs are written under:
+
+- `vector_db/scope=<scope>/...`
+
+Optional flags:
+
+```bash
+python script/vdbbuilder.py --out_dir vector_db --embedder local --no-build-faiss
+python script/vdbbuilder.py --out_dir vector_db --embedder local --no-faiss-gpu
+```
+
+Main outputs:
+
+- `vector_db/units.parquet`
+- `vector_db/item_vectors.parquet`
+- `vector_db/vectors/pooled/item=<ITEM>/year=<YEAR>.npz`
+- `vector_db/vectors/residual/item=<ITEM>/year=<YEAR>.npz`
+- `vector_db/indices/item=<ITEM>/year=<YEAR>/...` (if FAISS build is enabled)
+
+## 3) Find Peers
+
+Orthogonal method:
+
+```bash
+python script/peerfinder.py \
+  --vdb_dir vector_db \
+  --scope all \
+  --focalfirm 0000320193 \
+  --year 2024 \
+  --item 1A \
+  --method orthogonal \
+  --k 20 \
+  --q_share 0.20 \
+  --out_path output/peer_sets.csv.gz
+```
+
+Pairwise cosine method:
+
+```bash
+python script/peerfinder.py \
+  --vdb_dir vector_db \
+  --scope all \
+  --focalfirm 0000320193 \
+  --year 2024 \
+  --item 1A \
+  --method cosine \
+  --k 20
+```
+
+Multiple items:
+
+```bash
+python script/peerfinder.py --vdb_dir vector_db --scope all --focalfirm 0000320193 --year 2024 --item 1A 7 7A --method orthogonal
+```
+
+Gemini text-comparison method (uses item text from `units.parquet`):
+
+```bash
+set GEMINI_API_KEY=...
+python script/peerfinder.py \
+  --vdb_dir vector_db \
+  --scope all \
+  --focalfirm 0000320193 \
+  --year 2024 \
+  --item 1A \
+  --method gemini \
+  --gemini-model gemini-3-flash-preview \
+  --k 20
+```
+
+Gemini free-tier pacing defaults are built in:
+
+- `--gemini-rpm 5`
+- `--gemini-tpm 250000`
+- `--gemini-rpd 20`
+
+Reliability controls for Gemini:
+
+- `--gemini-max-retries` (default `5`)
+- `--gemini-backoff-base-sec` (default `2.0`)
+- `--gemini-timeout-sec` (default `90`)
+
+## Precompute Similarity Matrix Cache
+
+Build and save NxN similarity matrix per `(item, year, method)`:
 
 ```bash
 python script/peerfinder.py \
@@ -89,15 +170,23 @@ python script/peerfinder.py \
   --focalfirm 0000320193 \
   --year 2024 \
   --item 1A \
-  --k 20 \
-  --q_share 0.20 \
-  --out_path output/peer_sets.csv.gz
+  --method orthogonal \
+  --precompute
 ```
 
-Use `--item all` to run across all available items.
+Force rebuild:
 
-## Notes
+```bash
+python script/peerfinder.py --vdb_dir vector_db --focalfirm 0000320193 --year 2024 --item 1A --method orthogonal --precompute --precompute-overwrite
+```
 
-- `peerfinder` requires FAISS.
-- `vdbbuilder --embedder local` is deterministic and works without external API calls.
-- Downloader writes run artifacts under `logs/` and `stats/`.
+Cache behavior:
+
+- If table exists, `peerfinder` uses it first.
+- If table does not exist, `peerfinder` computes on demand.
+- If `--precompute` is passed, missing table is created and then used.
+
+Cache paths:
+
+- `vector_db/precomputed/item=<ITEM>/year=<YEAR>/method=<METHOD>/similarity.npy`
+- `vector_db/precomputed/item=<ITEM>/year=<YEAR>/method=<METHOD>/firm_ids.json`
