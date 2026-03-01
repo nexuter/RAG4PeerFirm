@@ -35,6 +35,12 @@ All scopes are written into separate output namespaces:
 <out_dir>/scope=<scope>/...
 ```
 
+## Year filter behavior
+
+- `--year` / `--years` is optional.
+- If omitted, builder scans and processes all years found in `--filing_dir`.
+- If provided (e.g., `--year 2012 2013`), only those years are processed.
+
 ## End-to-end algorithm
 
 For each `(firm_id, year, item_id)`:
@@ -147,6 +153,7 @@ Core:
 - `--filing_dir` default `sec_filings`
 - `--out_dir` required
 - `--filing` choices `10-K`, `10-Q`
+- `--year` optional one or more years (default all years)
 - `--scope` choices `heading`, `body`, `all`
 - `--items` comma-separated item ids
 
@@ -187,20 +194,20 @@ Indexing:
 All-text scope with local embeddings:
 
 ```bash
-python script/vdbbuilder.py --filing_dir sec_filings --out_dir vector_db --filing 10-K --scope all --embedder local
+python script/vdbbuilder.py --filing_dir sec_filings --out_dir vector_db --filing 10-K --year 2024 --scope all --embedder local
 ```
 
 Heading-only scope:
 
 ```bash
-python script/vdbbuilder.py --filing_dir sec_filings --out_dir vector_db --filing 10-K --scope heading --embedder local
+python script/vdbbuilder.py --filing_dir sec_filings --out_dir vector_db --filing 10-K --year 2024 --scope heading --embedder local
 ```
 
 Body-only scope with OpenAI:
 
 ```bash
 set OPENAI_API_KEY=...
-python script/vdbbuilder.py --filing_dir sec_filings --out_dir vector_db --filing 10-K --scope body --embedder openai --embed_model text-embedding-3-large
+python script/vdbbuilder.py --filing_dir sec_filings --out_dir vector_db --filing 10-K --year 2024 --scope body --embedder openai --embed_model text-embedding-3-large
 ```
 
 ## Troubleshooting
@@ -209,13 +216,20 @@ python script/vdbbuilder.py --filing_dir sec_filings --out_dir vector_db --filin
 - Check extractor outputs (`*_item.json` vs `*_str.json`) and `--scope`.
 - Check `--filing_dir` root path.
 
-2. `No units/items built`
+2. `Filing directory does not exist` / `not a directory`
+- Check `--filing_dir` value.
+
+3. `No source JSON filings found for selected year(s): ...`
+- Confirm requested years exist under `sec_filings/<cik>/<year>/...`.
+- Remove `--year` to test full-directory discovery.
+
+4. `No units/items built`
 - Lower `--min_unit_tokens` or `--min_units_per_item`.
 - Verify item ids passed in `--items` exist in extracted JSON.
 
-3. OpenAI errors
+5. OpenAI errors
 - Verify `OPENAI_API_KEY`.
 - Ensure `--embed_model` passed with `--embedder openai`.
 
-4. FAISS GPU warning
+6. FAISS GPU warning
 - GPU may exist but faiss GPU bindings unavailable; install proper FAISS GPU package.

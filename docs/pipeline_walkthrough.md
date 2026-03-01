@@ -32,6 +32,7 @@ These extracted JSON files are consumed by `vdbbuilder.py`.
 Use `script/vdbbuilder.py` to:
 
 - read extracted JSON (`*_item.json` or `*_str.json` based on scope),
+- optionally filter by one or more years (`--year`),
 - chunk text into units,
 - generate embeddings,
 - pool units into item vectors,
@@ -79,7 +80,7 @@ Precompute support:
 python script/downloader.py --filing 10k --year 2024 --output_dir sec_filings --user_agent "YourApp/1.0 (you@example.com)"
 
 # B. Build vectors (all text)
-python script/vdbbuilder.py --filing_dir sec_filings --out_dir vector_db --filing 10-K --scope all --embedder local
+python script/vdbbuilder.py --filing_dir sec_filings --out_dir vector_db --filing 10-K --year 2024 --scope all --embedder local
 
 # C. Query peers
 python script/peerfinder.py --vdb_dir vector_db --scope all --focalfirm 0000320193 --year 2024 --item 1A --method orthogonal --k 20
@@ -97,4 +98,3 @@ python script/peerfinder.py --vdb_dir vector_db --scope all --focalfirm 00003201
 - `openai` requires `OPENAI_API_KEY`.
 - `gemini` method in peerfinder requires `GEMINI_API_KEY` (or `--gemini-api-key`).
 - FAISS GPU is auto-used if bindings and GPU are available.
-

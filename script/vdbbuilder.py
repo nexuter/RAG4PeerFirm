@@ -451,6 +451,7 @@ class BuildConfig:
     filing_dir: Path
     out_dir: Path
     filing_type: str
+    years: Optional[List[int]]
     scope: str
     items: List[str]
     embedder: str
@@ -480,6 +481,11 @@ def build(cfg: BuildConfig) -> None:
     - pooled/residual `.npz` matrices per item-year
     - optional FAISS index files per item-year
     """
+    if not cfg.filing_dir.exists():
+        raise FileNotFoundError(f"Filing directory does not exist: {cfg.filing_dir}")
+    if not cfg.filing_dir.is_dir():
+        raise NotADirectoryError(f"Filing path is not a directory: {cfg.filing_dir}")
+
     scoped_out_dir = cfg.out_dir / f"scope={cfg.scope}"
     scoped_out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -490,6 +496,24 @@ def build(cfg: BuildConfig) -> None:
 
     if not files:
         raise RuntimeError(f"No source JSON filings found for scope={cfg.scope} under {cfg.filing_dir}")
+
+    if cfg.years:
+        selected_years = set(int(y) for y in cfg.years)
+        filtered: List[Path] = []
+        for path in files:
+            try:
+                _, year = infer_firm_year_from_path(path, cfg.filing_dir)
+            except ValueError:
+                continue
+            if year in selected_years:
+                filtered.append(path)
+        files = filtered
+        if not files:
+            years_txt = ", ".join(str(y) for y in sorted(selected_years))
+            raise RuntimeError(
+                f"No source JSON filings found for selected year(s): {years_txt} "
+                f"(scope={cfg.scope}, filing={cfg.filing_type}, dir={cfg.filing_dir})"
+            )
 
     units_rows: List[Dict[str, object]] = []
     item_rows: List[Dict[str, object]] = []
@@ -664,6 +688,15 @@ def main() -> None:
     ap.add_argument("--out_dir", required=True, help="Output directory")
     ap.add_argument("--filing", default="10-K", choices=["10-K", "10-Q"], dest="filing_type")
     ap.add_argument(
+        "--year",
+        "--years",
+        type=int,
+        nargs="+",
+        default=None,
+        dest="years",
+        help="Optional year filter. Default is all years under --filing_dir. Example: --year 2012 2013",
+    )
+    ap.add_argument(
         "--scope",
         default="all",
         choices=["heading", "body", "all"],
@@ -708,6 +741,7 @@ def main() -> None:
         filing_dir=Path(args.filing_dir),
         out_dir=Path(args.out_dir),
         filing_type=args.filing_type,
+        years=None if not args.years else sorted({int(y) for y in args.years}),
         scope=str(args.scope),
         items=[normalize_item_id(i) for i in args.items.split(",") if i.strip()],
         embedder=args.embedder,

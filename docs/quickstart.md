@@ -21,6 +21,7 @@ python script/vdbbuilder.py \
   --filing_dir sec_filings \
   --out_dir vector_db \
   --filing 10-K \
+  --year 2024 \
   --scope all \
   --embedder local
 ```
@@ -70,7 +71,7 @@ After this, future runs for the same `scope/item/year/method` read the cache fir
 Build heading-only vectors:
 
 ```bash
-python script/vdbbuilder.py --filing_dir sec_filings --out_dir vector_db --filing 10-K --scope heading --embedder local
+python script/vdbbuilder.py --filing_dir sec_filings --out_dir vector_db --filing 10-K --year 2024 --scope heading --embedder local
 ```
 
 Query heading-only peers:
@@ -106,12 +107,16 @@ Default free-tier pacing is already configured:
 1. `No source JSON filings found...`
 - Check `--filing_dir` and extracted JSON files exist.
 
-2. `No units/items built`
+2. `No source JSON filings found for selected year(s)...`
+- Check `--year` values exist in `sec_filings`.
+- Remove `--year` to process all available years.
+
+3. `No units/items built`
 - Dataset may be too small for token thresholds. Lower:
   - `--min_unit_tokens`
   - `--min_units_per_item`
 
-3. `No peers produced`
+4. `No peers produced`
 - Verify focal firm/year/item exists in built scope output.
 - Ensure `--scope` in peerfinder matches scope used in vdbbuilder.
 
@@ -123,4 +128,3 @@ For deeper details, see:
 - `docs/vdbbuilder.md`
 - `docs/peerfinder.md`
 - `docs/pipeline_walkthrough.md`
-

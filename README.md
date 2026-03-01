@@ -55,6 +55,7 @@ python script/vdbbuilder.py \
   --filing_dir sec_filings \
   --out_dir vector_db \
   --filing 10-K \
+  --year 2024 \
   --scope all \
   --embedder local
 ```
@@ -67,6 +68,7 @@ python script/vdbbuilder.py \
   --filing_dir sec_filings \
   --out_dir vector_db \
   --filing 10-K \
+  --year 2024 \
   --scope all \
   --embedder openai \
   --embed_model text-embedding-3-large
@@ -77,6 +79,9 @@ Scope options:
 - `--scope all`: use `*_item.json` and `items[item_id].text_content` (existing behavior)
 - `--scope heading`: use `*_str.json` and concatenate all `heading` values in each item structure
 - `--scope body`: use `*_str.json` and concatenate all `body` values in each item structure
+- `--year` (optional): one or more years to build
+  - default: build all years found under `--filing_dir`
+  - example: `--year 2012 2013`
 
 Scope-specific outputs are written under:
 
@@ -91,11 +96,17 @@ python script/vdbbuilder.py --out_dir vector_db --embedder local --no-faiss-gpu
 
 Main outputs:
 
-- `vector_db/units.parquet`
-- `vector_db/item_vectors.parquet`
-- `vector_db/vectors/pooled/item=<ITEM>/year=<YEAR>.npz`
-- `vector_db/vectors/residual/item=<ITEM>/year=<YEAR>.npz`
-- `vector_db/indices/item=<ITEM>/year=<YEAR>/...` (if FAISS build is enabled)
+- `vector_db/scope=<scope>/units.parquet`
+- `vector_db/scope=<scope>/item_vectors.parquet`
+- `vector_db/scope=<scope>/vectors/pooled/item=<ITEM>/year=<YEAR>.npz`
+- `vector_db/scope=<scope>/vectors/residual/item=<ITEM>/year=<YEAR>.npz`
+- `vector_db/scope=<scope>/indices/item=<ITEM>/year=<YEAR>/...` (if FAISS build is enabled)
+
+Error behavior:
+
+- errors if `--filing_dir` does not exist
+- errors if `--filing_dir` exists but has no matching source JSON for selected scope/filing
+- errors if selected `--year` values have no matching filings
 
 ## 3) Find Peers
 
@@ -188,5 +199,5 @@ Cache behavior:
 
 Cache paths:
 
-- `vector_db/precomputed/item=<ITEM>/year=<YEAR>/method=<METHOD>/similarity.npy`
-- `vector_db/precomputed/item=<ITEM>/year=<YEAR>/method=<METHOD>/firm_ids.json`
+- `vector_db/scope=<scope>/precomputed/scope=<scope>/item=<ITEM>/year=<YEAR>/method=<METHOD>/similarity.npy`
+- `vector_db/scope=<scope>/precomputed/scope=<scope>/item=<ITEM>/year=<YEAR>/method=<METHOD>/firm_ids.json`
