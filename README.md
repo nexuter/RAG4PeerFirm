@@ -1,15 +1,19 @@
 ﻿# RAG4PeerFirm
 
-Minimal project for SEC filing download, vector building, and peer identification.
+SEC filing pipeline for download, extraction, vector-db build, and peer-firm matching.
 
 ## Project Layout
 
-- `script/downloader.py`: SEC EDGAR downloader client (supports ticker/CIK and accession-based download)
-- `utils/index_parser.py`: SEC full-index parser for filing records and CIK lists
-- `utils/file_manager.py`: file IO helpers for filing storage
-- `script/vdbbuilder.py`: builds unit table, item vectors, residual vectors, and per-item/year FAISS indices
-- `script/peerfinder.py`: common-screen + specific-rank peer search using built vectors/indices
-- `test/smoke_test.py`: minimal import/API smoke test for core modules
+- `script/downloader.py`: download filings from SEC EDGAR (supports ticker/CIK filters)
+- `script/extractor.py`: extract filing items and structure JSON from downloaded filings
+- `script/vdbbuilder.py`: build unit/item vectors, residual vectors, and FAISS indices
+- `script/peerfinder.py`: run common-screen + specific-rank peer matching
+- `utils/downloader.py`: SEC downloader client
+- `utils/index_parser.py`: SEC full-index parser
+- `utils/file_manager.py`: file IO helpers
+- `utils/parser.py`, `utils/extractor.py`, `utils/structure_extractor.py`: extraction internals
+- `utils/config.py`: shared constants
+- `tests/smoke_test.py`: lightweight compile/import smoke test
 
 ## Install
 
@@ -20,25 +24,44 @@ pip install -r requirements.txt
 ## Smoke Test
 
 ```bash
-python test/smoke_test.py
+python tests/smoke_test.py
 ```
 
 ## 1) Download Filings
 
-Use your downloader entrypoint/CLI to populate raw filing data under your filing directory.
-
-Expected directory shape for downstream steps:
-
-```text
-<filing_dir>/<cik>/<year>/<filing_type>/<file>.txt|.htm|.html
+```bash
+python script/downloader.py \
+  --filing 10k \
+  --year 2024 \
+  --output_dir sec_filings \
+  --user_agent "RAG4PeerFirm/1.0 (your-email@example.com)"
 ```
 
-## 2) Build Vector DB
+Examples:
+
+```bash
+# specific tickers
+python script/downloader.py --filing 10k --year 2024 --ticker AAPL MSFT --output_dir sec_filings --user_agent "RAG4PeerFirm/1.0 (your-email@example.com)"
+
+# specific CIKs
+python script/downloader.py --filing 10k --year 2024 --cik 0000320193 0000789019 --output_dir sec_filings --user_agent "RAG4PeerFirm/1.0 (your-email@example.com)"
+```
+
+## 2) Extract Items and Structure
+
+```bash
+python script/extractor.py \
+  --filing_dir sec_filings \
+  --filing 10-K \
+  --year 2024
+```
+
+## 3) Build Vector DB
 
 ```bash
 python script/vdbbuilder.py \
-  --filing_dir <filing_dir> \
-  --out_dir <vdb_out> \
+  --filing_dir sec_filings \
+  --out_dir vector_db \
   --filing 10-K \
   --embedder local
 ```
@@ -46,11 +69,11 @@ python script/vdbbuilder.py \
 OpenAI embeddings:
 
 ```bash
-set OPENAI_API_KEY=...    # Windows
-python script/vdbbuilder.py --filing_dir <filing_dir> --out_dir <vdb_out> --embedder openai
+set OPENAI_API_KEY=...
+python script/vdbbuilder.py --filing_dir sec_filings --out_dir vector_db --filing 10-K --embedder openai
 ```
 
-Outputs under `<vdb_out>`:
+Outputs under `<out_dir>`:
 
 - `units.parquet`
 - `item_vectors.parquet`
@@ -58,13 +81,13 @@ Outputs under `<vdb_out>`:
 - `vectors/residual/item=*/year=*.npz`
 - `indices/item=*/year=*/pooled.faiss` (+ residual where available)
 
-## 3) Find Peers
+## 4) Find Peers
 
 ```bash
 python script/peerfinder.py \
-  --vdb_dir <vdb_out> \
-  --focalfirm <cik_or_firm_id> \
-  --year <year> \
+  --vdb_dir vector_db \
+  --focalfirm 0000320193 \
+  --year 2024 \
   --item 1A \
   --k 20 \
   --q_share 0.20 \
@@ -76,6 +99,5 @@ Use `--item all` to run across all available items.
 ## Notes
 
 - `peerfinder` requires FAISS.
-- `vdbbuilder --embedder local` is deterministic and offline-friendly.
-
-
+- `vdbbuilder --embedder local` is deterministic and works without external API calls.
+- Downloader writes run artifacts under `logs/` and `stats/`.
