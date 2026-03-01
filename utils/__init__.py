@@ -1,8 +1,7 @@
-"""
-Utility modules for RAG4PeerFirm
-"""
+"""RAG4PeerFirm utility modules."""
 
-from .logger import ExtractionLogger
-from .file_manager import FileManager
-
-__all__ = ['ExtractionLogger', 'FileManager']
+__all__ = [
+    "config",
+    "index_parser",
+    "file_manager",
+]

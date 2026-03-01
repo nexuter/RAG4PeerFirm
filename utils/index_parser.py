@@ -5,7 +5,7 @@ SEC EDGAR Full-Index Parser - Retrieves all companies from quarterly index files
 import requests
 import re
 from typing import List, Set, Dict, Tuple
-from script.config import SEC_BASE_URL, SEC_USER_AGENT, REQUEST_TIMEOUT, REQUEST_DELAY
+from utils.config import SEC_BASE_URL, SEC_USER_AGENT, REQUEST_TIMEOUT, REQUEST_DELAY
 import time
 
 
@@ -104,6 +104,7 @@ class SECIndexParser:
             
             # Filter by filing type
             if form_type == filing_type:
+                accession = self._extract_accession_from_file_name(file_name)
                 # Normalize CIK (remove leading zeros for consistency)
                 cik_normalized = cik.lstrip('0') or '0'
                 
@@ -113,10 +114,57 @@ class SECIndexParser:
                     'cik': cik_normalized,
                     'cik_padded': cik.zfill(10),
                     'date_filed': date_filed,
-                    'file_name': file_name
+                    'file_name': file_name,
+                    'accession_number': accession,
                 })
         
         return filings
+
+    def _extract_accession_from_file_name(self, file_name: str) -> str:
+        """
+        Extract accession number from SEC index file name path.
+
+        Args:
+            file_name: SEC index file_name field (usually .../0000123456-24-000123.txt)
+
+        Returns:
+            Accession number formatted with dashes, or empty string if not found.
+        """
+        if not file_name:
+            return ""
+        match = re.search(r'(\d{10}-\d{2}-\d{6})', file_name)
+        if match:
+            return match.group(1)
+        return ""
+
+    def get_filing_records_for_filing(self, filing_type: str, years: List[int]) -> List[Dict[str, str]]:
+        """
+        Get all filing records from SEC full-index for a filing type and years.
+
+        Unlike get_all_companies_for_filing, this returns all filing records and
+        does not deduplicate by CIK/year.
+
+        Args:
+            filing_type: Filing type (e.g., '10-K')
+            years: List of years to scan (by filing date year / index year)
+
+        Returns:
+            List of filing records with cik/date_filed/file_name/accession_number.
+        """
+        all_records: List[Dict[str, str]] = []
+        for year in years:
+            for quarter in range(1, 5):
+                try:
+                    content = self._download_index_file(year, quarter)
+                    if not content:
+                        continue
+                    records = self._parse_index_file(content, filing_type)
+                    all_records.extend(records)
+                except Exception as e:
+                    print(f"Warning: Failed to process {year} Q{quarter}: {str(e)}")
+                    continue
+        all_records.sort(key=lambda x: x.get('date_filed', ''), reverse=True)
+        return all_records
     
     def get_all_companies_for_filing(self, filing_type: str, years: List[int]) -> List[Dict[str, str]]:
         """

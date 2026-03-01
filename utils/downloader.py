@@ -7,7 +7,7 @@ import time
 import re
 from typing import Optional, Tuple
 from bs4 import BeautifulSoup
-from script.config import (
+from utils.config import (
     SEC_BASE_URL, SEC_USER_AGENT, REQUEST_TIMEOUT, REQUEST_DELAY
 )
 
@@ -101,6 +101,7 @@ class SECDownloader:
             URL of the filing HTML document or None if not found
         """
         try:
+            year = str(year)
             # Search for filings using JSON endpoint (more reliable)
             search_url = f"{SEC_BASE_URL}/files/company_tickers.json"
             
@@ -156,11 +157,11 @@ class SECDownloader:
             for accession_formatted, accession_path, filing_date in filings_from_year:
                     
                     # Construct direct URL to filing documents
-                    cik_padded = cik.zfill(10)
+                    cik_archive = str(int(cik)) if cik.isdigit() else cik.lstrip('0')
                     
                     # The filing documents are typically at:
                     # https://www.sec.gov/Archives/edgar/{CIK}/{accession_no_dashes}/{accession_no_with_dashes}-index.html
-                    doc_index_url = f"{SEC_BASE_URL}/Archives/edgar/data/{cik_padded}/{accession_path}/{accession_formatted}-index.html"
+                    doc_index_url = f"{SEC_BASE_URL}/Archives/edgar/data/{cik_archive}/{accession_path}/{accession_formatted}-index.html"
                     
                     time.sleep(REQUEST_DELAY)
                     try:
@@ -221,8 +222,68 @@ class SECDownloader:
         except Exception as e:
             raise Exception(f"Failed to get filing URL: {str(e)}")
 
+    def _get_document_url_from_accession(self, cik: str, accession_formatted: str) -> Optional[str]:
+        """
+        Resolve the main filing document URL from a CIK and accession number.
+
+        Args:
+            cik: CIK number (10 digits)
+            accession_formatted: Accession number in dashed format (XXXXXXXXXX-YY-ZZZZZZ)
+
+        Returns:
+            URL to the filing HTML/HTM document, or None if not found.
+        """
+        accession_path = accession_formatted.replace('-', '')
+        cik_archive = str(int(cik)) if cik.isdigit() else cik.lstrip('0')
+        doc_index_url = (
+            f"{SEC_BASE_URL}/Archives/edgar/data/{cik_archive}/"
+            f"{accession_path}/{accession_formatted}-index.html"
+        )
+
+        doc_response = None
+        for attempt in range(5):
+            time.sleep(max(1.0, REQUEST_DELAY * (attempt + 1) * 5))
+            doc_response = self.session.get(doc_index_url, timeout=REQUEST_TIMEOUT)
+            if doc_response.status_code == 200:
+                break
+            if doc_response.status_code == 429:
+                continue
+            return None
+        if doc_response is None or doc_response.status_code != 200:
+            return None
+
+        doc_soup = BeautifulSoup(doc_response.content, 'html.parser')
+        table = doc_soup.find('table', class_='tableFile') or doc_soup.find('table', class_='tableFile2')
+        if not table:
+            return None
+
+        rows = table.find_all('tr')[1:]  # Skip header
+
+        # Prefer sequence 1 HTML/HTM.
+        for row in rows:
+            cols = row.find_all('td')
+            if len(cols) < 4:
+                continue
+            sequence = cols[0].text.strip()
+            filename = cols[2].text.strip()
+            if sequence != '1':
+                continue
+            if not (filename.endswith('.htm') or filename.endswith('.html') or 'htm' in filename):
+                continue
+
+            link = cols[2].find('a')
+            if not link or not link.get('href'):
+                continue
+            href = link['href']
+            if '/ix?doc=' in href:
+                doc_path = href.split('/ix?doc=')[1]
+                return f"{SEC_BASE_URL}{doc_path}"
+            return f"{SEC_BASE_URL}{href}"
+
+        return None
+
     
-    def download_filing(self, cik_or_ticker: str, filing_type: str, 
+    def download_filing(self, cik_or_ticker: str, filing_type: str,
                        year: str) -> Tuple[str, str, str]:
         """
         Download a SEC filing
@@ -238,6 +299,8 @@ class SECDownloader:
         Raises:
             Exception: If download fails
         """
+        year = str(year)
+
         # Normalize CIK
         cik, original_identifier = self._normalize_cik(cik_or_ticker)
         
@@ -257,4 +320,33 @@ class SECDownloader:
         if filing_url.endswith('.htm'):
             extension = 'htm'
         
+        return response.text, extension, cik
+
+    def download_filing_by_accession(
+        self,
+        cik_or_ticker: str,
+        accession_formatted: str
+    ) -> Tuple[str, str, str]:
+        """
+        Download a filing by accession number.
+
+        Args:
+            cik_or_ticker: CIK number or ticker symbol
+            accession_formatted: Accession number in dashed format
+
+        Returns:
+            Tuple of (HTML content, file extension, CIK padded to 10 digits)
+        """
+        cik, _original_identifier = self._normalize_cik(cik_or_ticker)
+        filing_url = self._get_document_url_from_accession(cik, accession_formatted)
+        if not filing_url:
+            raise Exception(f"No filing document found for accession {accession_formatted}")
+
+        time.sleep(REQUEST_DELAY)
+        response = self.session.get(filing_url, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+
+        extension = 'html'
+        if filing_url.endswith('.htm'):
+            extension = 'htm'
         return response.text, extension, cik
