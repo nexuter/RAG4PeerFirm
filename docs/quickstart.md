@@ -82,25 +82,20 @@ python script/peerfinder.py --vdb_dir vector_db --scope heading --focalfirm 0000
 
 Repeat with `--scope body` to compare body-only behavior.
 
-## 5) Optional: Gemini method
+## 5) Optional: llama3 method
 
 ```bash
-set GEMINI_API_KEY=YOUR_KEY
 python script/peerfinder.py \
   --vdb_dir vector_db \
   --scope all \
   --focalfirm 0000320193 \
   --year 2024 \
   --item 1A \
-  --method gemini \
+  --method llama3 \
+  --llama-base-url http://localhost:8321/v1 \
+  --llama-model llama3.3-70b \
   --k 10
 ```
-
-Default free-tier pacing is already configured:
-
-- RPM `5`
-- TPM `250000`
-- RPD `20`
 
 ## Common first-run issues
 

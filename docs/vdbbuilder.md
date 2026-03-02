@@ -139,7 +139,7 @@ Purpose:
 
 - Unit-level audit table.
 - Keeps the exact text chunks that were embedded.
-- Main text source for `peerfinder --method gemini`.
+- Main text source for `peerfinder --method llama3`.
 
 Composition:
 

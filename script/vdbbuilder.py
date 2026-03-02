@@ -380,7 +380,8 @@ def load_items_from_struct_json(path: Path, allowed_items: Sequence[str], scope:
 def save_npz(path: Path, mat: np.ndarray, ids: np.ndarray) -> None:
     """Save matrix and aligned ids as compressed NPZ."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(path, mat=mat.astype(np.float32), ids=ids)
+    ids_arr = np.asarray(ids, dtype=np.str_)
+    np.savez_compressed(path, mat=mat.astype(np.float32), ids=ids_arr)
 
 
 def _faiss_gpu_available() -> bool:
@@ -651,7 +652,12 @@ def build(cfg: BuildConfig) -> None:
 
         residual_path = scoped_out_dir / "vectors" / "residual" / f"item={item_id}" / f"year={year}.npz"
         residual_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(residual_path, mat=residual_mat, ids=firm_ids, mask=residual_mask)
+        np.savez_compressed(
+            residual_path,
+            mat=residual_mat.astype(np.float32),
+            ids=np.asarray(firm_ids, dtype=np.str_),
+            mask=residual_mask.astype(np.int8),
+        )
 
         if cfg.build_faiss:
             if not _HAS_FAISS:

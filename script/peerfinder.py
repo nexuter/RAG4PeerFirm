@@ -10,7 +10,7 @@ Inputs:
 - Similarity mode (`--method`):
   - `orthogonal`: common-screen then specific-rank behavior.
   - `cosine`: direct pairwise cosine on pooled item embeddings.
-  - `gemini`: direct LLM comparison on item text from `units.parquet`.
+  - `llama3`: local LLM comparison on item text via llama-stack endpoint.
 
 Design:
 1. Load per-item-year pooled and residual matrices.
@@ -31,20 +31,17 @@ Output:
 from __future__ import annotations
 
 import argparse
-import collections
+from datetime import datetime
 import json
 import math
 import os
-import random
 import re
 import subprocess
-import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import requests
 
 try:
     import faiss  # type: ignore
@@ -59,14 +56,28 @@ def ensure_dir(path: Path) -> None:
 
 def load_pooled(path: Path) -> Tuple[np.ndarray, np.ndarray]:
     """Load pooled vectors and aligned firm ids from npz."""
-    data = np.load(path, allow_pickle=False)
-    return data["mat"].astype(np.float32), data["ids"].astype(str)
+    try:
+        data = np.load(path, allow_pickle=False)
+        return data["mat"].astype(np.float32), data["ids"].astype(str)
+    except ValueError as exc:
+        # Backward compatibility: older builds may have object-dtype ids in NPZ.
+        if "Object arrays cannot be loaded" not in str(exc):
+            raise
+        data = np.load(path, allow_pickle=True)
+        return data["mat"].astype(np.float32), data["ids"].astype(str)
 
 
 def load_residual(path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Load residual vectors, aligned firm ids, and validity mask from npz."""
-    data = np.load(path, allow_pickle=False)
-    return data["mat"].astype(np.float32), data["ids"].astype(str), data["mask"].astype(np.int8)
+    try:
+        data = np.load(path, allow_pickle=False)
+        return data["mat"].astype(np.float32), data["ids"].astype(str), data["mask"].astype(np.int8)
+    except ValueError as exc:
+        # Backward compatibility: older builds may have object-dtype ids in NPZ.
+        if "Object arrays cannot be loaded" not in str(exc):
+            raise
+        data = np.load(path, allow_pickle=True)
+        return data["mat"].astype(np.float32), data["ids"].astype(str), data["mask"].astype(np.int8)
 
 
 def _faiss_gpu_available() -> bool:
@@ -299,78 +310,16 @@ def _extract_first_json_object(text: str) -> Optional[dict]:
         return None
 
 
-class GeminiQuotaError(RuntimeError):
-    """Raised when Gemini quota constraints prevent further requests in this run."""
+def _resolve_llama_api_key(cli_key: Optional[str]) -> str:
+    """Resolve llama endpoint API key (optional for local stacks)."""
+    key = str(cli_key or os.getenv("LLAMA_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
+    # Local llama-stack typically ignores API key; keep a non-empty placeholder for client compatibility.
+    return key or "local"
 
 
-class GeminiRateLimiter:
-    """
-    Client-side limiter for Gemini calls.
-
-    Limits:
-    - RPM: requests per rolling 60 seconds
-    - TPM: estimated tokens per rolling 60 seconds
-    - RPD: requests per rolling 24 hours
-    """
-
-    def __init__(self, rpm: int, tpm: int, rpd: int) -> None:
-        self.rpm = max(0, int(rpm))
-        self.tpm = max(0, int(tpm))
-        self.rpd = max(0, int(rpd))
-
-        self.req_60: "collections.deque[float]" = collections.deque()
-        self.req_24h: "collections.deque[float]" = collections.deque()
-        self.tok_60: "collections.deque[Tuple[float, int]]" = collections.deque()
-        self.tok_60_sum = 0
-
-    def _prune(self, now: float) -> None:
-        while self.req_60 and now - self.req_60[0] >= 60.0:
-            self.req_60.popleft()
-        while self.req_24h and now - self.req_24h[0] >= 86400.0:
-            self.req_24h.popleft()
-        while self.tok_60 and now - self.tok_60[0][0] >= 60.0:
-            _, tok = self.tok_60.popleft()
-            self.tok_60_sum -= tok
-
-    def acquire(self, estimated_tokens: int) -> None:
-        estimated_tokens = max(1, int(estimated_tokens))
-        while True:
-            now = time.time()
-            self._prune(now)
-
-            if self.rpd and len(self.req_24h) >= self.rpd:
-                raise GeminiQuotaError(
-                    f"Gemini RPD limit reached ({self.rpd}). "
-                    "Retry later or increase quota."
-                )
-
-            waits: List[float] = []
-            if self.rpm and len(self.req_60) >= self.rpm:
-                waits.append(max(0.0, 60.0 - (now - self.req_60[0]) + 0.05))
-            if self.tpm and (self.tok_60_sum + estimated_tokens) > self.tpm:
-                if self.tok_60:
-                    waits.append(max(0.0, 60.0 - (now - self.tok_60[0][0]) + 0.05))
-                else:
-                    waits.append(60.0)
-
-            if waits:
-                time.sleep(max(waits))
-                continue
-
-            self.req_60.append(now)
-            self.req_24h.append(now)
-            self.tok_60.append((now, estimated_tokens))
-            self.tok_60_sum += estimated_tokens
-            return
-
-
-def _estimate_tokens(text: str) -> int:
-    # Rough approximation for quota pacing when tokenizer is unavailable here.
-    return max(1, int(len(text) / 4))
-
-
-def gemini_similarity_score(
+def llama3_similarity_score(
     *,
+    base_url: str,
     api_key: str,
     model: str,
     focal_firm: str,
@@ -380,26 +329,26 @@ def gemini_similarity_score(
     focal_text: str,
     peer_text: str,
     timeout_sec: int,
-    limiter: GeminiRateLimiter,
-    max_retries: int,
-    backoff_base_sec: float,
 ) -> Tuple[float, str]:
     """
-    Ask Gemini for an item-content similarity score in [0, 1].
+    Ask local llama3 endpoint for item-content similarity score in [0, 1].
 
-    Returns:
-    - score: float in [0, 1] (nan on parse failure)
-    - note: short rationale or parse/runtime status
+    Uses OpenAI-compatible chat completions API exposed by llama-stack.
     """
+    try:
+        from openai import OpenAI  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("openai package is required for llama3 method client calls.") from exc
+
     prompt = f"""
 You are comparing two firms using only SEC 10-K item text.
 
 Task:
-- Compare the semantic business similarity for item {item_id} in fiscal year {year}.
-- Use ONLY the supplied text snippets.
-- Return a JSON object with keys:
-  - "score": number between 0 and 1, where 1 means highly similar and 0 means unrelated.
-  - "reason": short one-sentence rationale.
+- Compare semantic business similarity for item {item_id} in fiscal year {year}.
+- Use ONLY supplied text snippets.
+- Return JSON object with:
+  - "score": number in [0,1]
+  - "reason": one short sentence
 
 Firm A (focal): {focal_firm}
 Firm B (peer): {peer_firm}
@@ -411,58 +360,23 @@ Firm B item text:
 {peer_text}
 """.strip()
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.0,
-            "responseMimeType": "application/json",
-        },
-    }
-    estimated_tokens = _estimate_tokens(prompt)
-
-    last_error = ""
-    for attempt in range(max(1, int(max_retries))):
-        limiter.acquire(estimated_tokens)
-        try:
-            resp = requests.post(url, json=payload, timeout=timeout_sec)
-            if resp.status_code in (429, 500, 502, 503, 504):
-                retry_after = resp.headers.get("Retry-After")
-                if retry_after and str(retry_after).isdigit():
-                    wait = float(retry_after)
-                else:
-                    wait = float(backoff_base_sec) * (2 ** attempt) + random.uniform(0.0, 0.6)
-                time.sleep(min(wait, 60.0))
-                last_error = f"http_{resp.status_code}"
-                continue
-
-            resp.raise_for_status()
-            raw = resp.json()
-            break
-        except GeminiQuotaError:
-            raise
-        except requests.RequestException as exc:
-            wait = float(backoff_base_sec) * (2 ** attempt) + random.uniform(0.0, 0.6)
-            time.sleep(min(wait, 60.0))
-            last_error = f"request_error: {exc}"
-    else:
-        return float("nan"), f"gemini_retry_exhausted: {last_error}"
-
-    text = (
-        raw.get("candidates", [{}])[0]
-        .get("content", {})
-        .get("parts", [{}])[0]
-        .get("text", "")
+    client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout_sec)
+    resp = client.chat.completions.create(
+        model=model,
+        temperature=0.0,
+        messages=[
+            {"role": "system", "content": "Return compact JSON only."},
+            {"role": "user", "content": prompt},
+        ],
     )
-    obj = _extract_first_json_object(str(text))
+    text = (resp.choices[0].message.content or "").strip()
+    obj = _extract_first_json_object(text)
     if not obj:
-        return float("nan"), "gemini_response_not_json"
-
+        return float("nan"), "llama_response_not_json"
     try:
         score = float(obj.get("score"))
     except Exception:
         return float("nan"), str(obj.get("reason") or "missing_score")
-
     score = max(0.0, min(1.0, score))
     reason = str(obj.get("reason") or "")
     return score, reason[:400]
@@ -481,15 +395,11 @@ def run_peerfinder(
     method: str,
     precompute: bool,
     precompute_overwrite: bool,
-    gemini_api_key: Optional[str],
-    gemini_model: str,
-    gemini_max_chars: int,
-    gemini_timeout_sec: int,
-    gemini_rpm: int,
-    gemini_tpm: int,
-    gemini_rpd: int,
-    gemini_max_retries: int,
-    gemini_backoff_base_sec: float,
+    llama_base_url: str,
+    llama_api_key: Optional[str],
+    llama_model: str,
+    llama_max_chars: int,
+    llama_timeout_sec: int,
 ) -> pd.DataFrame:
     """
     Run peer search for all requested items and return peer rows.
@@ -505,11 +415,6 @@ def run_peerfinder(
     selected_items = sorted({str(item_id).upper() for item_id in items if str(item_id).strip()})
 
     rows: List[Dict[str, object]] = []
-    gemini_limiter = GeminiRateLimiter(
-        rpm=gemini_rpm,
-        tpm=gemini_tpm,
-        rpd=gemini_rpd,
-    ) if method == "gemini" else None
 
     for item_id in selected_items:
         pooled_path = active_vdb_dir / "vectors" / "pooled" / f"item={item_id}" / f"year={year}.npz"
@@ -527,52 +432,44 @@ def run_peerfinder(
             if not np.array_equal(firm_ids, residual_ids):
                 raise RuntimeError(f"ID alignment mismatch for item={item_id}, year={year}")
 
-        if method == "gemini":
+        if method == "llama3":
             if precompute:
-                print("[WARN] --precompute is ignored for method=gemini (LLM scoring runs on demand).")
-            api_key = str(gemini_api_key or os.getenv("GEMINI_API_KEY") or "").strip()
-            if not api_key:
-                raise RuntimeError("Gemini method requires API key. Set GEMINI_API_KEY or pass --gemini-api-key.")
+                print("[WARN] --precompute is ignored for method=llama3 (LLM scoring runs on demand).")
+            api_key = _resolve_llama_api_key(llama_api_key)
             where = np.where(firm_ids == str(focalfirm))[0]
             if len(where) == 0:
                 continue
 
-            focal_texts = load_unit_text_by_firm(active_vdb_dir, year=year, item_id=item_id, scope=scope)
-            focal_text_raw = focal_texts.get(str(focalfirm), "")
+            texts = load_unit_text_by_firm(active_vdb_dir, year=year, item_id=item_id, scope=scope)
+            focal_text_raw = texts.get(str(focalfirm), "")
             if not focal_text_raw:
                 continue
-            focal_text = _truncate_text(focal_text_raw, gemini_max_chars)
+            focal_text = _truncate_text(focal_text_raw, llama_max_chars)
 
             scored: List[Tuple[str, float, str]] = []
             for peer_firm in firm_ids:
                 peer_id = str(peer_firm)
                 if peer_id == str(focalfirm):
                     continue
-                peer_text_raw = focal_texts.get(peer_id, "")
+                peer_text_raw = texts.get(peer_id, "")
                 if not peer_text_raw:
                     continue
-
-                peer_text = _truncate_text(peer_text_raw, gemini_max_chars)
+                peer_text = _truncate_text(peer_text_raw, llama_max_chars)
                 try:
-                    score, reason = gemini_similarity_score(
+                    score, reason = llama3_similarity_score(
+                        base_url=llama_base_url,
                         api_key=api_key,
-                        model=gemini_model,
+                        model=llama_model,
                         focal_firm=str(focalfirm),
                         peer_firm=peer_id,
                         item_id=item_id,
                         year=int(year),
                         focal_text=focal_text,
                         peer_text=peer_text,
-                        timeout_sec=gemini_timeout_sec,
-                        limiter=gemini_limiter,
-                        max_retries=gemini_max_retries,
-                        backoff_base_sec=gemini_backoff_base_sec,
+                        timeout_sec=llama_timeout_sec,
                     )
-                except GeminiQuotaError as exc:
-                    print(f"[WARN] {exc}")
-                    break
                 except Exception as exc:
-                    score, reason = float("nan"), f"gemini_error: {exc}"
+                    score, reason = float("nan"), f"llama_error: {exc}"
                 scored.append((peer_id, score, reason))
 
             scored = [x for x in scored if not np.isnan(x[1])]
@@ -590,9 +487,9 @@ def run_peerfinder(
                         "sim_specific": float(score),
                         "q_share": float(q_share),
                         "k": int(top_k),
-                        "method": "gemini",
+                        "method": "llama3",
                         "source": "on_demand",
-                        "gemini_reason": reason,
+                        "llama_reason": reason,
                     }
                 )
             continue
@@ -754,8 +651,8 @@ def main() -> None:
     parser.add_argument(
         "--method",
         default="orthogonal",
-        choices=["orthogonal", "cosine", "gemini"],
-        help="Similarity method: orthogonal, cosine, or gemini (LLM text comparison from units.parquet).",
+        choices=["orthogonal", "cosine", "llama3"],
+        help="Similarity method: orthogonal, cosine, or llama3 (LLM text comparison from units.parquet).",
     )
     parser.add_argument(
         "--precompute",
@@ -776,58 +673,37 @@ def main() -> None:
     )
     parser.add_argument("--no-faiss-gpu", dest="faiss_use_gpu", action="store_false")
     parser.add_argument(
-        "--gemini-api-key",
+        "--llama-base-url",
+        default="http://localhost:8321/v1",
+        help="OpenAI-compatible base URL for llama-stack endpoint.",
+    )
+    parser.add_argument(
+        "--llama-api-key",
         default=None,
-        help="Gemini API key. If omitted, reads GEMINI_API_KEY from environment.",
+        help="Optional API key for llama endpoint. Defaults to LLAMA_API_KEY/OPENAI_API_KEY or 'local'.",
     )
     parser.add_argument(
-        "--gemini-model",
-        default="gemini-3-flash-preview",
-        help="Gemini model name for --method gemini.",
+        "--llama-model",
+        default="llama3.3-70b",
+        help="Llama model id for --method llama3.",
     )
     parser.add_argument(
-        "--gemini-max-chars",
+        "--llama-max-chars",
         type=int,
         default=12000,
-        help="Max chars per firm item text sent to Gemini (head+tail truncation if exceeded).",
+        help="Max chars per firm item text sent to llama3 (head+tail truncation if exceeded).",
     )
     parser.add_argument(
-        "--gemini-timeout-sec",
+        "--llama-timeout-sec",
         type=int,
-        default=90,
-        help="HTTP timeout seconds for each Gemini request.",
+        default=120,
+        help="HTTP timeout seconds for llama3 requests.",
     )
     parser.add_argument(
-        "--gemini-rpm",
-        type=int,
-        default=5,
-        help="Gemini client-side rate limit: requests per minute (default: 5).",
+        "--out_path",
+        default="output/peer_sets_{timestamp}.csv",
+        help="Output csv/parquet path. Supports {timestamp} placeholder.",
     )
-    parser.add_argument(
-        "--gemini-tpm",
-        type=int,
-        default=250000,
-        help="Gemini client-side rate limit: estimated tokens per minute (default: 250000).",
-    )
-    parser.add_argument(
-        "--gemini-rpd",
-        type=int,
-        default=20,
-        help="Gemini client-side rate limit: requests per day (default: 20).",
-    )
-    parser.add_argument(
-        "--gemini-max-retries",
-        type=int,
-        default=5,
-        help="Max retries for transient Gemini API errors (429/5xx/network).",
-    )
-    parser.add_argument(
-        "--gemini-backoff-base-sec",
-        type=float,
-        default=2.0,
-        help="Base backoff seconds for exponential retry pacing.",
-    )
-    parser.add_argument("--out_path", default="output/peer_sets.csv.gz", help="Output csv/parquet path")
     args = parser.parse_args()
 
     out_df = run_peerfinder(
@@ -842,25 +718,26 @@ def main() -> None:
         method=str(args.method),
         precompute=bool(args.precompute),
         precompute_overwrite=bool(args.precompute_overwrite),
-        gemini_api_key=str(args.gemini_api_key) if args.gemini_api_key else None,
-        gemini_model=str(args.gemini_model),
-        gemini_max_chars=int(args.gemini_max_chars),
-        gemini_timeout_sec=int(args.gemini_timeout_sec),
-        gemini_rpm=int(args.gemini_rpm),
-        gemini_tpm=int(args.gemini_tpm),
-        gemini_rpd=int(args.gemini_rpd),
-        gemini_max_retries=int(args.gemini_max_retries),
-        gemini_backoff_base_sec=float(args.gemini_backoff_base_sec),
+        llama_base_url=str(args.llama_base_url),
+        llama_api_key=str(args.llama_api_key) if args.llama_api_key else None,
+        llama_model=str(args.llama_model),
+        llama_max_chars=int(args.llama_max_chars),
+        llama_timeout_sec=int(args.llama_timeout_sec),
     )
 
-    out_path = Path(args.out_path)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = Path(str(args.out_path).replace("{timestamp}", timestamp))
     ensure_dir(out_path)
     if out_path.suffix.lower() == ".parquet":
         out_df.to_parquet(out_path, index=False)
     else:
-        if out_path.suffix.lower() not in {".csv", ".gz", ".csv.gz"}:
-            out_path = out_path.with_suffix(".csv.gz")
-        out_df.to_csv(out_path, index=False, compression="gzip")
+        low = out_path.name.lower()
+        if low.endswith(".csv.gz") or low.endswith(".gz"):
+            out_df.to_csv(out_path, index=False, compression="gzip")
+        else:
+            if out_path.suffix.lower() != ".csv":
+                out_path = out_path.with_suffix(".csv")
+            out_df.to_csv(out_path, index=False)
 
     print(f"[DONE] Wrote peer sets: {out_path}")
 

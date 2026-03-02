@@ -60,13 +60,13 @@ Use `script/peerfinder.py` to query peers for:
 - year (`--year`)
 - item(s) (`--item`)
 - scope (`--scope`)
-- method (`orthogonal`, `cosine`, `gemini`)
+- method (`orthogonal`, `cosine`, `llama3`)
 
 Modes:
 
 - `orthogonal`: common-screen, specific-rank.
 - `cosine`: direct pooled cosine ranking.
-- `gemini`: text-to-text LLM scoring from `units.parquet`.
+- `llama3`: text-to-text LLM scoring from `units.parquet`.
 
 Precompute support:
 
@@ -96,5 +96,5 @@ python script/peerfinder.py --vdb_dir vector_db --scope all --focalfirm 00003201
 
 - `local` embedding is deterministic and API-free.
 - `openai` requires `OPENAI_API_KEY`.
-- `gemini` method in peerfinder requires `GEMINI_API_KEY` (or `--gemini-api-key`).
+- `llama3` method in peerfinder requires a reachable llama endpoint (`--llama-base-url`).
 - FAISS GPU is auto-used if bindings and GPU are available.

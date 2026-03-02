@@ -8,7 +8,7 @@ Module file: `script/peerfinder.py`
 
 - `orthogonal`: common-screen then specific-rank (residual-aware),
 - `cosine`: direct pairwise cosine on pooled vectors,
-- `gemini`: LLM-based text comparison using unit text.
+- `llama3`: LLM-based text comparison using unit text.
 
 It supports scope-aware querying (`all`, `heading`, `body`) and optional precomputed NxN matrices.
 
@@ -20,7 +20,7 @@ From `vdbbuilder` output:
 <vdb_dir>/scope=<scope>/item_vectors/item_vectors_<YEAR>.parquet
 <vdb_dir>/scope=<scope>/vectors/pooled/item=<ITEM>/year=<YEAR>.npz
 <vdb_dir>/scope=<scope>/vectors/residual/item=<ITEM>/year=<YEAR>.npz   # orthogonal method
-<vdb_dir>/scope=<scope>/units/units_<YEAR>.parquet                      # gemini method
+<vdb_dir>/scope=<scope>/units/units_<YEAR>.parquet                      # llama3 method
 ```
 
 If `scope=<scope>` folder does not exist, module falls back to `<vdb_dir>` for backward compatibility.
@@ -156,12 +156,12 @@ Output fields:
 - `sim_common`: cosine score
 - `sim_specific`: `NaN`
 
-## 3) `gemini`
+## 3) `llama3`
 
 For each requested item:
 
 1. Build text per firm by joining unit text from `units/units_<YEAR>.parquet`.
-2. Send focal text + peer text to Gemini prompt.
+2. Send focal text + peer text to llama endpoint prompt.
 3. Parse JSON response:
    - `score` in `[0,1]`
    - short `reason`
@@ -169,15 +169,15 @@ For each requested item:
 
 Output fields:
 
-- `sim_specific`: Gemini score
-- `gemini_reason`: short rationale
+- `sim_specific`: llama3 score
+- `llama_reason`: short rationale
 - `sim_common`: `NaN`
 
 ## Precompute cache
 
 Supported methods: `orthogonal`, `cosine`.
 
-Not supported: `gemini` (always on-demand).
+Not supported: `llama3` (always on-demand).
 
 Cache path:
 
@@ -195,24 +195,11 @@ Runtime behavior:
    - without `--precompute`: compute on demand.
 3. With `--precompute-overwrite`: rebuild even if cache exists.
 
-## Gemini rate limiting and retries
+## Llama3 runtime notes
 
-Built-in client-side limiter supports:
-
-- RPM (`--gemini-rpm`, default `5`)
-- TPM (`--gemini-tpm`, default `250000`, estimated)
-- RPD (`--gemini-rpd`, default `20`)
-
-Retries for transient API failures:
-
-- status: `429`, `500`, `502`, `503`, `504`
-- network request exceptions
-- exponential backoff:
-  - `--gemini-max-retries` default `5`
-  - `--gemini-backoff-base-sec` default `2.0`
-- honors `Retry-After` header when provided.
-
-When RPD is exhausted, run prints warning and stops additional Gemini comparisons.
+- Llama3 runs on-demand only (no precompute path).
+- Keep `--llama-max-chars` reasonable to control latency.
+- Endpoint must be OpenAI-compatible (`/v1/chat/completions`).
 
 ## CLI reference
 
@@ -227,7 +214,7 @@ Core query:
 
 Method:
 
-- `--method` (`orthogonal|cosine|gemini`, default `orthogonal`)
+- `--method` (`orthogonal|cosine|llama3`, default `orthogonal`)
 - `--q_share` candidate share for orthogonal screening (default `0.20`)
 
 Precompute:
@@ -239,17 +226,13 @@ FAISS:
 
 - `--faiss-gpu` / `--no-faiss-gpu`
 
-Gemini:
+Llama3:
 
-- `--gemini-api-key` (or env `GEMINI_API_KEY`)
-- `--gemini-model` default `gemini-3-flash-preview`
-- `--gemini-max-chars` default `12000`
-- `--gemini-timeout-sec` default `90`
-- `--gemini-rpm` default `5`
-- `--gemini-tpm` default `250000`
-- `--gemini-rpd` default `20`
-- `--gemini-max-retries` default `5`
-- `--gemini-backoff-base-sec` default `2.0`
+- `--llama-base-url` default `http://localhost:8321/v1`
+- `--llama-api-key` optional (or env `LLAMA_API_KEY` / `OPENAI_API_KEY`)
+- `--llama-model` default `llama3.3-70b`
+- `--llama-max-chars` default `12000`
+- `--llama-timeout-sec` default `120`
 
 Output:
 
@@ -272,9 +255,9 @@ Common columns:
 - `method`
 - `source` (`precomputed` or `on_demand`)
 
-Gemini-only:
+Llama3-only:
 
-- `gemini_reason`
+- `llama_reason`
 
 ## Example commands
 
@@ -290,11 +273,10 @@ Cosine with precompute:
 python script/peerfinder.py --vdb_dir vector_db --scope body --focalfirm 0000320193 --year 2024 --item 1A --method cosine --precompute --k 20
 ```
 
-Gemini:
+Llama3:
 
 ```bash
-set GEMINI_API_KEY=...
-python script/peerfinder.py --vdb_dir vector_db --scope heading --focalfirm 0000320193 --year 2024 --item 1A --method gemini --k 10
+python script/peerfinder.py --vdb_dir vector_db --scope heading --focalfirm 0000320193 --year 2024 --item 1A --method llama3 --llama-base-url http://localhost:8321/v1 --llama-model llama3.3-70b --k 10
 ```
 
 ## Troubleshooting
@@ -304,11 +286,11 @@ python script/peerfinder.py --vdb_dir vector_db --scope heading --focalfirm 0000
 - Verify item/year/focal firm exists in vectors.
 - For orthogonal, ensure residual file exists and contains candidates.
 
-2. Gemini returns many NaN scores
-- Responses may be non-JSON or rate-limited.
-- Increase retries or reduce run size.
-- Lower `--gemini-max-chars` to reduce prompt size.
+2. Llama3 returns many NaN scores
+- Responses may be non-JSON from the endpoint.
+- Verify endpoint/model and reduce run size.
+- Lower `--llama-max-chars` to reduce prompt size.
 
 3. Slow runtime
 - Prefer precompute for `orthogonal` and `cosine`.
-- For Gemini, limit peers/items or run in batches.
+- For llama3, limit peers/items or run in batches.

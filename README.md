@@ -11,7 +11,7 @@ Pipeline for SEC filing download, item extraction, vector building, and peer-fir
   - Produces pooled/residual vectors and optional FAISS indices.
 - `script/peerfinder.py`
   - Finds item-level peers for a focal firm and year.
-  - Supports `orthogonal` and `cosine` similarity methods.
+  - Supports `orthogonal`, `cosine`, and `llama3` similarity methods.
   - Supports cached precomputed NxN similarity matrices.
 
 ## Input Data Assumptions
@@ -167,32 +167,27 @@ Multiple items:
 python script/peerfinder.py --vdb_dir vector_db --scope all --focalfirm 0000320193 --year 2024 --item 1A 7 7A --method orthogonal
 ```
 
-Gemini text-comparison method (uses item text from `units.parquet`):
+Llama3 text-comparison method (uses item text from `units.parquet`):
 
 ```bash
-set GEMINI_API_KEY=...
 python script/peerfinder.py \
   --vdb_dir vector_db \
   --scope all \
   --focalfirm 0000320193 \
   --year 2024 \
   --item 1A \
-  --method gemini \
-  --gemini-model gemini-3-flash-preview \
+  --method llama3 \
+  --llama-base-url http://localhost:8321/v1 \
+  --llama-model llama3.3-70b \
   --k 20
 ```
 
-Gemini free-tier pacing defaults are built in:
+Llama3 controls:
 
-- `--gemini-rpm 5`
-- `--gemini-tpm 250000`
-- `--gemini-rpd 20`
-
-Reliability controls for Gemini:
-
-- `--gemini-max-retries` (default `5`)
-- `--gemini-backoff-base-sec` (default `2.0`)
-- `--gemini-timeout-sec` (default `90`)
+- `--llama-base-url` (default `http://localhost:8321/v1`)
+- `--llama-model` (default `llama3.3-70b`)
+- `--llama-max-chars` (default `12000`)
+- `--llama-timeout-sec` (default `120`)
 
 ## Precompute Similarity Matrix Cache
 
