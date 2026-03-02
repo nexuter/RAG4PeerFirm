@@ -30,3 +30,10 @@ Recommended reading order for new users:
 - `Residual vector`: item-specific component after removing common direction.
 - `Common similarity`: pooled cosine similarity.
 - `Specific similarity`: residual cosine similarity.
+
+## Testing Notes
+
+- Integration tests live in `tests/test_integration_pipeline.py`.
+- You can run only builder-related tests with:
+  - `python -m pytest tests/test_integration_pipeline.py -k vdbbuilder`
+- `pytest.ini` is ignored in this repo; if you want custom marker config locally, create your own `pytest.ini`.

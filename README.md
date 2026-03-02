@@ -29,6 +29,29 @@ Pipeline for SEC filing download, item extraction, vector building, and peer-fir
 pip install -r requirements.txt
 ```
 
+## Testing
+
+Run integration tests:
+
+```bash
+python -m pytest tests/test_integration_pipeline.py
+```
+
+Run only vdbbuilder coverage:
+
+```bash
+python -m pytest tests/test_integration_pipeline.py -k vdbbuilder
+```
+
+Optional local marker registration (to suppress `PytestUnknownMarkWarning` for `integration`):
+
+```ini
+# pytest.ini (local file)
+[pytest]
+markers =
+    integration: integration tests for end-to-end pipeline behavior
+```
+
 ## 1) Download Filings
 
 ```bash

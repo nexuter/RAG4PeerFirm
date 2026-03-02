@@ -106,44 +106,153 @@ All under:
 <out_dir>/scope=<scope>/
 ```
 
+Typical directory structure:
+
+```text
+<out_dir>/
+  scope=all|heading|body/
+    units/
+      units_2022.parquet
+      units_2023.parquet
+      units_2024.parquet
+    item_vectors/
+      item_vectors_2022.parquet
+      item_vectors_2023.parquet
+      item_vectors_2024.parquet
+    vectors/
+      pooled/
+        item=1A/year=2024.npz
+        item=7/year=2024.npz
+      residual/
+        item=1A/year=2024.npz
+        item=7/year=2024.npz
+    indices/                       # only when --build-faiss
+      item=1A/year=2024/pooled.faiss
+      item=1A/year=2024/residual.faiss
+      item=1A/year=2024/pooled_ids.json
+      item=1A/year=2024/residual_ids.json
+```
+
 ### `units/units_<YEAR>.parquet`
 
-One row per unit:
+Purpose:
+
+- Unit-level audit table.
+- Keeps the exact text chunks that were embedded.
+- Main text source for `peerfinder --method gemini`.
+
+Composition:
+
+- one row per unit chunk.
+- rows are keyed by `(firm_id, year, item_id, unit_id)`.
+
+Key columns:
 
 - `firm_id`, `year`, `item_id`, `unit_id`
 - `unit_text`, `unit_tokens`
 - `embedding_model`
-- `embedding` (JSON-serialized vector)
+- `embedding` (JSON string of vector values)
 - `source_path`, `scope`
+
+Example row (conceptual):
+
+```text
+firm_id=0000320193
+year=2024
+item_id=1A
+unit_id=12
+unit_tokens=243
+scope=all
+source_path=sec_filings/0000320193/2024/10-K/0000320193_2024_10-K_item.json
+unit_text="...risk factors paragraph chunk..."
+embedding="[0.014, -0.037, ...]"
+```
 
 ### `item_vectors/item_vectors_<YEAR>.parquet`
 
-One row per `(firm_id, year, item_id)`:
+Purpose:
+
+- Item-level summary table after pooling/decomposition.
+- Useful for diagnostics and analysis without loading NPZ files.
+
+Composition:
+
+- one row per `(firm_id, year, item_id)`.
+- each row corresponds to multiple units from `units_<YEAR>.parquet`.
+
+Key columns:
 
 - `num_units`, `item_tokens`
-- `pooled_embedding` (JSON)
-- `w_max`, `w_mean`
+- `pooled_embedding` (JSON vector)
+- `w_max`, `w_mean` (distinctiveness-weight diagnostics)
 - `common_loading`, `residual_norm`, `residual_embedding`
 - `scope`
 
-### NPZ matrices
+Example row (conceptual):
 
-- `vectors/pooled/item=<ITEM>/year=<YEAR>.npz`
-  - `mat`: pooled matrix `[N, D]`
-  - `ids`: aligned firm ids `[N]`
+```text
+firm_id=0000320193
+year=2024
+item_id=1A
+num_units=38
+item_tokens=9120
+w_max=0.0821
+w_mean=0.0317
+common_loading=0.913
+residual_norm=0.406
+residual_embedding="[0.021, -0.005, ...]"   # null when residual below threshold
+```
 
-- `vectors/residual/item=<ITEM>/year=<YEAR>.npz`
-  - `mat`: residual matrix `[N, D]` (zero rows for invalid residuals)
-  - `ids`: aligned firm ids `[N]`
-  - `mask`: residual valid flag `[N]` (`1` valid, `0` invalid)
+### `vectors/pooled/item=<ITEM>/year=<YEAR>.npz`
 
-### Optional FAISS indices
+Purpose:
 
-Written if `--build-faiss`:
+- Fast matrix for similarity search on pooled vectors.
+- Primary retrieval artifact for cosine/common similarity.
 
-- pooled index + ids
-- residual index + ids (only valid residual rows)
+Composition:
 
+- `mat`: pooled matrix with shape `[N, D]`
+  - `N`: firms available for this `(item, year)`
+  - `D`: embedding dimension
+- `ids`: aligned firm id array with shape `[N]`
+
+Alignment rule:
+
+- `mat[i]` always belongs to firm `ids[i]`.
+
+### `vectors/residual/item=<ITEM>/year=<YEAR>.npz`
+
+Purpose:
+
+- Fast matrix for firm-specific (residual) similarity.
+- Used by orthogonal method in peerfinder.
+
+Composition:
+
+- `mat`: residual matrix `[N, D]`
+- `ids`: aligned firm ids `[N]`
+- `mask`: residual-valid flag `[N]`
+  - `1`: residual exists (norm above floor)
+  - `0`: residual missing (row in `mat` is zero vector)
+
+Interpretation:
+
+- Peerfinder uses residual similarity only when both focal and peer have `mask=1`.
+- Otherwise it falls back to pooled/common similarity.
+
+### `indices/...` (optional FAISS)
+
+Purpose:
+
+- Prebuilt nearest-neighbor indexes for high-speed retrieval.
+
+Generated when `--build-faiss`:
+
+- `pooled.faiss` + `pooled_ids.json`
+- `residual.faiss` + `residual_ids.json` (only valid residual rows)
+
+These files are optional because peerfinder can still run from NPZ matrices.
 FAISS GPU is used when available and enabled (`--faiss-gpu`).
 
 ## CLI reference

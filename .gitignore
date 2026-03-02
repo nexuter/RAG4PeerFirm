@@ -54,3 +54,4 @@ Thumbs.db
 htmlcov/
 tests/
 vector_db_test/
+pytest.ini
