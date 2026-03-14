@@ -1,39 +1,32 @@
 """
 vdbbuilder.py
 
-Builds vectorized item-level data artifacts from extracted SEC filing JSON files.
+Build local FAISS-backed vector artifacts for item-level peer matching.
 
-Input:
-- Filing files: `*_item.json` under `<filing_dir>/<firm_id>/<year>/<filing_type>/`.
-- Each file is expected to contain:
-  - `toc_items`: item ids available in the filing.
-  - `items[item_id].text_content` (or fallback `html_content`).
+Main design:
+1. Load extracted item text from filing JSON files.
+2. For `all` and `heading` scopes, chunk long item text, embed chunks locally,
+   and pool them into one vector per `(firm, year, item)`.
+3. For `summary` scope, read sibling `_summ.json` artifacts and embed each
+   summary directly into one vector per `(firm, year, item)`.
+4. Persist per-year tables and per-item/year pooled matrices plus FAISS indices.
 
-Core pipeline design:
-1. Read filing item text from JSON.
-2. Canonicalize text and split into token-based overlapping units.
-3. Embed units with selected backend:
-   - `local`: deterministic hash embedding (offline, reproducible).
-   - `openai`: OpenAI embedding API.
-4. Pool unit vectors into one item vector using distinctiveness weighting.
-5. For each (item, year), compute leave-one-out common direction and residual vector.
-6. Persist tables and matrices; optionally write FAISS indices.
+Current VDB granularity:
+- Exactly one pooled vector per `(firm, year, item)` in every scope.
 
-Outputs under `--out_dir`:
-- `units/units_<YEAR>.parquet`: one row per unit with metadata and unit embedding.
-- `item_vectors/item_vectors_<YEAR>.parquet`: one row per firm-year-item with pooled and residual stats.
-- `vectors/pooled/item=<ITEM>/year=<YEAR>.npz`: normalized pooled vectors + ids.
-- `vectors/residual/item=<ITEM>/year=<YEAR>.npz`: normalized residual vectors + ids + mask.
-- `indices/...` (optional): FAISS inner-product indices for pooled/residual vectors.
+Outputs under `--out_dir/scope=<scope>/`:
+- `item_vectors/item_vectors_<YEAR>.parquet`
+- `units/units_<YEAR>.parquet` for chunked scopes (`all`, `heading`)
+- `vectors/pooled/item=<ITEM>/year=<YEAR>.npz`
+- `indices/item=<ITEM>/year=<YEAR>/pooled.faiss`
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
-import subprocess
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -44,9 +37,8 @@ from bs4 import BeautifulSoup
 
 try:
     import faiss  # type: ignore
-    _HAS_FAISS = True
-except Exception:
-    _HAS_FAISS = False
+except Exception as exc:
+    raise RuntimeError("faiss is required for vdbbuilder. Install faiss-cpu or faiss-gpu.") from exc
 
 try:
     import tiktoken  # type: ignore
@@ -54,94 +46,70 @@ try:
 except Exception:
     _HAS_TIKTOKEN = False
 
+
 DEFAULT_ITEMS = [
     "1", "1A", "1B", "1C", "2", "3", "4", "5", "6", "7", "7A", "8", "9", "9A", "9B", "9C",
-    "10", "11", "12", "13", "14", "15",
+    "10", "11", "12", "13", "14", "15", "16",
 ]
+DEFAULT_EMBED_MODEL = "BAAI/bge-m3"
 DEFAULT_WEIGHT_EPS = 1e-6
 
-NUM_PATTERNS = [
-    (re.compile(r"(?i)\(\s*\$?\s*\d[\d,]*\.?\d*\s*\)"), " NEG_NUM "),
-    (re.compile(r"(?i)-\s*\$?\s*\d[\d,]*\.?\d*"), " NEG_NUM "),
-    (re.compile(r"(?i)\$?\s*\d[\d,]*\.?\d*\s*%"), " PCT "),
-    (re.compile(r"(?i)\$?\s*\d[\d,]*\.?\d*"), " NUM "),
-]
+# Tuned from observed item length statistics supplied for 10-K items.
+ITEM_DEFAULT_CHUNK_TOKENS: Dict[str, int] = {
+    "1": 400,
+    "1A": 480,
+    "1B": 160,
+    "1C": 160,
+    "2": 240,
+    "3": 240,
+    "4": 160,
+    "5": 280,
+    "6": 240,
+    "7": 400,
+    "7A": 240,
+    "8": 480,
+    "9": 160,
+    "9A": 240,
+    "9B": 160,
+    "9C": 160,
+    "10": 280,
+    "11": 240,
+    "12": 240,
+    "13": 240,
+    "14": 200,
+    "15": 320,
+    "16": 240,
+}
 
 
-class Embedder:
-    """Embedding interface for unit text batches."""
+class SentenceTransformerEmbedder:
+    """Local embedding wrapper around sentence-transformers."""
 
-    def embed_texts(self, texts: List[str]) -> np.ndarray:
-        raise NotImplementedError
-
-
-class LocalHashEmbedder(Embedder):
-    """Deterministic local embedder for offline end-to-end execution."""
-
-    def __init__(self, dim: int = 384):
-        self.dim = dim
-
-    def _embed_one(self, text: str) -> np.ndarray:
-        digest = hashlib.blake2b(text.encode("utf-8"), digest_size=32).digest()
-        seed = int.from_bytes(digest[:8], "little")
-        rng = np.random.default_rng(seed)
-        vec = rng.standard_normal(self.dim).astype(np.float32)
-        vec /= np.linalg.norm(vec) + 1e-12
-        return vec
-
-    def embed_texts(self, texts: List[str]) -> np.ndarray:
-        return np.stack([self._embed_one(t) for t in texts], axis=0)
-
-
-class OpenAIEmbedder(Embedder):
-    """OpenAI API embedder with batched requests."""
-
-    def __init__(self, model: str = "text-embedding-3-large", batch_size: int = 64):
-        self.model = model
-        self.batch_size = batch_size
+    def __init__(self, model_name: str) -> None:
+        self.model_name = model_name
         try:
-            from openai import OpenAI  # type: ignore
+            from sentence_transformers import SentenceTransformer  # type: ignore
         except Exception as exc:
-            raise RuntimeError("openai package not installed. pip install openai") from exc
-        self.client = OpenAI()
+            raise RuntimeError(
+                "sentence-transformers is required for local embedding. "
+                "Install it with `pip install sentence-transformers`."
+            ) from exc
+        self.model = SentenceTransformer(model_name, trust_remote_code=True)
 
     def embed_texts(self, texts: List[str]) -> np.ndarray:
-        vectors: List[np.ndarray] = []
-        for i in range(0, len(texts), self.batch_size):
-            batch = texts[i : i + self.batch_size]
-            resp = self.client.embeddings.create(model=self.model, input=batch)
-            arr = np.array([d.embedding for d in resp.data], dtype=np.float32)
-            arr /= np.linalg.norm(arr, axis=1, keepdims=True) + 1e-12
-            vectors.append(arr)
-        return np.concatenate(vectors, axis=0)
-
-
-def make_embedder(name: str, model: Optional[str], batch_size: int) -> Tuple[Embedder, str]:
-    """Create embedder instance and return `(embedder, model_name_for_metadata)`."""
-    if name == "local":
-        emb = LocalHashEmbedder()
-        return emb, f"local-hash-{emb.dim}"
-    if name == "openai":
-        if not model:
-            raise ValueError("--embed_model is required when --embedder openai is used")
-        emb = OpenAIEmbedder(model=model, batch_size=batch_size)
-        return emb, model
-    raise ValueError(f"Unsupported --embedder: {name}")
-
-
-def normalize_item_id(item: str) -> str:
-    return re.sub(r"\s+", "", item.strip().upper())
+        arr = self.model.encode(
+            texts,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+        )
+        return np.asarray(arr, dtype=np.float32)
 
 
 class TokenCounter:
-    """
-    Token counter used for chunking and unit filtering.
-
-    Uses `tiktoken` when available; falls back to whitespace tokenization.
-    """
+    """Token counter for chunk sizing with tiktoken fallback."""
 
     def __init__(self, model_name: str = "gpt-4o-mini") -> None:
-        self.model_name = model_name
         self._enc = None
         if _HAS_TIKTOKEN:
             try:
@@ -152,20 +120,29 @@ class TokenCounter:
     def count(self, text: str) -> int:
         if self._enc is not None:
             return len(self._enc.encode(text))
-        return len(tokenize(text))
+        return len(re.findall(r"\S+", text))
+
+
+def normalize_item_id(item: str) -> str:
+    return re.sub(r"\s+", "", item.strip().upper())
+
+
+def resolve_chunk_tokens(item_id: str, override: Optional[int]) -> int:
+    if override is not None:
+        return int(override)
+    return ITEM_DEFAULT_CHUNK_TOKENS.get(normalize_item_id(item_id), 280)
+
+
+def resolve_overlap_tokens(item_id: str, chunk_tokens: int, override: Optional[int]) -> int:
+    if override is not None:
+        return int(override)
+    item_default = ITEM_DEFAULT_CHUNK_TOKENS.get(normalize_item_id(item_id), chunk_tokens)
+    scaled = int(round(item_default * 0.2))
+    return max(40, min(120, scaled))
 
 
 def canonicalize_text(text: str) -> str:
-    """
-    Light text normalization for robust chunking and embeddings.
-
-    Keeps paragraph breaks, collapses whitespace, and canonicalizes numeric patterns.
-    """
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = re.sub(r"[ \t]{2,}", " | ", text)
-    for pattern, replacement in NUM_PATTERNS:
-        text = pattern.sub(replacement, text)
-    text = re.sub(r"\s+\|\s+\|\s+", " | ", text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
@@ -182,17 +159,8 @@ def chunk_by_tokens(
     overlap_tokens: int,
     min_unit_tokens: int,
 ) -> List[str]:
-    """
-    Split item text into overlapping token-based units.
-
-    Strategy:
-    - Respect paragraph boundaries where possible.
-    - Hard-split long paragraphs by token windows.
-    - Apply minimum token filter at unit level.
-    """
     paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
     units: List[str] = []
-
     buffer: List[str] = []
     buffer_tokens = 0
 
@@ -206,24 +174,24 @@ def chunk_by_tokens(
         buffer.clear()
         buffer_tokens = 0
 
-    for p in paras:
-        pt = token_counter.count(p)
-        if pt >= chunk_tokens:
-            words = tokenize(p)
+    for paragraph in paras:
+        para_tokens = token_counter.count(paragraph)
+        if para_tokens >= chunk_tokens:
+            words = tokenize(paragraph)
             step = max(1, chunk_tokens - overlap_tokens)
             for start in range(0, len(words), step):
-                w = words[start : start + chunk_tokens]
-                if len(w) >= min_unit_tokens:
-                    units.append(" ".join(w))
+                window = words[start : start + chunk_tokens]
+                if len(window) >= min_unit_tokens:
+                    units.append(" ".join(window))
             continue
 
-        if buffer_tokens + pt <= chunk_tokens:
-            buffer.append(p)
-            buffer_tokens += pt
+        if buffer_tokens + para_tokens <= chunk_tokens:
+            buffer.append(paragraph)
+            buffer_tokens += para_tokens
         else:
             flush()
-            buffer.append(p)
-            buffer_tokens = pt
+            buffer.append(paragraph)
+            buffer_tokens = para_tokens
 
     flush()
     return units
@@ -234,64 +202,19 @@ def distinctiveness_weighted_pool(
     eps: float = DEFAULT_WEIGHT_EPS,
     cap_percentile: float = 95.0,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
-    """
-    Pool unit vectors into one item vector using distance-from-centroid weights.
-
-    Returns:
-    - L2-normalized pooled vector.
-    - Weight statistics (`w_max`, `w_mean`) for diagnostics.
-    """
     if unit_vecs.shape[0] == 1:
-        vec = unit_vecs[0]
+        vec = unit_vecs[0].astype(np.float32)
+        vec /= np.linalg.norm(vec) + 1e-12
         return vec, {"w_max": 1.0, "w_mean": 1.0}
 
     centroid = unit_vecs.mean(axis=0)
     weights = np.linalg.norm(unit_vecs - centroid[None, :], axis=1) + eps
     cap = np.percentile(weights, cap_percentile)
     weights = np.minimum(weights, cap)
-
     pooled = (weights[:, None] * unit_vecs).sum(axis=0) / (weights.sum() + 1e-12)
     pooled = pooled.astype(np.float32)
     pooled /= np.linalg.norm(pooled) + 1e-12
-
     return pooled, {"w_max": float(weights.max()), "w_mean": float(weights.mean())}
-
-
-def orthogonal_decompose(v: np.ndarray, direction: np.ndarray) -> Tuple[float, np.ndarray, float]:
-    """Return `(alpha, residual, residual_norm)` from projection of `v` onto `direction`."""
-    alpha = float(np.dot(v, direction))
-    residual = v - alpha * direction
-    norm = float(np.linalg.norm(residual))
-    return alpha, residual.astype(np.float32), norm
-
-
-def infer_firm_year_from_path(path: Path, filing_dir: Path) -> Tuple[str, int]:
-    """Infer `(firm_id, year)` from canonical sec_filings layout or filename fallback."""
-    rel = path.relative_to(filing_dir)
-    parts = rel.parts
-
-    if len(parts) >= 4 and parts[1].isdigit() and parts[2].upper() in {"10-K", "10-Q"}:
-        return parts[0], int(parts[1])
-
-    m = re.search(r"(\d{10})_(\d{4})_10-K", path.name, flags=re.IGNORECASE)
-    if m:
-        return m.group(1), int(m.group(2))
-
-    raise ValueError(f"Unable to infer firm/year from path: {path}")
-
-
-def list_filing_files(filing_dir: Path, filing_type: str, scope: str) -> List[Path]:
-    """List source JSON files by scope and filing type."""
-    expected_type = filing_type.upper()
-    suffix = "_item.json" if scope == "all" else "_str.json"
-    candidates: List[Path] = []
-    for p in filing_dir.rglob(f"*{suffix}"):
-        if not p.is_file():
-            continue
-        if expected_type not in str(p).upper():
-            continue
-        candidates.append(p)
-    return sorted(candidates)
 
 
 def extract_text(s: str) -> str:
@@ -300,12 +223,35 @@ def extract_text(s: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def load_items_from_json(path: Path, allowed_items: Sequence[str]) -> Dict[str, str]:
-    """
-    Extract `{item_id: text_content}` for requested items from one filing JSON file.
+def infer_firm_year_from_path(path: Path, filing_dir: Path, filing_type: str) -> Tuple[str, int]:
+    rel = path.relative_to(filing_dir)
+    parts = rel.parts
+    if len(parts) >= 4 and parts[1].isdigit() and parts[2].upper() == filing_type.upper():
+        return parts[0], int(parts[1])
 
-    Item selection is driven by `toc_items` keys; text is read from `items`.
-    """
+    filing_pat = re.escape(filing_type.upper())
+    stem = path.stem.upper()
+    match = re.search(rf"(\d{{10}})_(\d{{4}})_{filing_pat}", stem)
+    if match:
+        return match.group(1), int(match.group(2))
+    raise ValueError(f"Unable to infer firm/year from path: {path}")
+
+
+def list_filing_files(filing_dir: Path, filing_type: str, scope: str) -> List[Path]:
+    suffix = {
+        "all": "_item.json",
+        "heading": "_str.json",
+        "summary": "_item_summ.json",
+    }[scope]
+    expected = filing_type.upper()
+    files: List[Path] = []
+    for path in filing_dir.rglob(f"*{suffix}"):
+        if path.is_file() and expected in str(path).upper():
+            files.append(path)
+    return sorted(files)
+
+
+def load_items_from_json(path: Path, allowed_items: Sequence[str]) -> Dict[str, str]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     toc_items = payload.get("toc_items")
     items = payload.get("items")
@@ -313,7 +259,6 @@ def load_items_from_json(path: Path, allowed_items: Sequence[str]) -> Dict[str, 
         return {}
     allowed = {normalize_item_id(x) for x in allowed_items}
     out: Dict[str, str] = {}
-    # Drive selection from toc_items, then read text_content from items[item_id].
     for key in toc_items.keys():
         item_id = normalize_item_id(str(key))
         if item_id not in allowed:
@@ -332,61 +277,63 @@ def load_items_from_json(path: Path, allowed_items: Sequence[str]) -> Dict[str, 
 
 
 def _collect_node_values(node: object, field: str, out: List[str]) -> None:
-    """Recursively collect `heading` or `body` values from nested structures."""
     if isinstance(node, dict):
-        val = node.get(field)
-        if isinstance(val, str):
-            s = val.strip()
-            if s:
-                out.append(s)
+        value = node.get(field)
+        if isinstance(value, str):
+            value = value.strip()
+            if value:
+                out.append(value)
         children = node.get("children")
         if isinstance(children, list):
-            for ch in children:
-                _collect_node_values(ch, field, out)
-        return
-    if isinstance(node, list):
-        for x in node:
-            _collect_node_values(x, field, out)
+            for child in children:
+                _collect_node_values(child, field, out)
+    elif isinstance(node, list):
+        for child in node:
+            _collect_node_values(child, field, out)
 
 
-def load_items_from_struct_json(path: Path, allowed_items: Sequence[str], scope: str) -> Dict[str, str]:
-    """
-    Extract item text from `*_str.json` structures.
-
-    - scope=heading: concatenate all `heading` values in each item subtree.
-    - scope=body: concatenate all `body` values in each item subtree.
-    """
+def load_items_from_struct_json(path: Path, allowed_items: Sequence[str]) -> Dict[str, str]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     structures = payload.get("structures")
     if not isinstance(structures, dict):
         return {}
-
     allowed = {normalize_item_id(x) for x in allowed_items}
-    by_norm: Dict[str, object] = {normalize_item_id(str(k)): v for k, v in structures.items()}
-    field = "heading" if scope == "heading" else "body"
-
+    by_norm = {normalize_item_id(str(k)): v for k, v in structures.items()}
     out: Dict[str, str] = {}
     for item_id in allowed:
         root = by_norm.get(item_id)
         if root is None:
             continue
         parts: List[str] = []
-        _collect_node_values(root, field, parts)
+        _collect_node_values(root, "heading", parts)
         if parts:
             out[item_id] = "\n\n".join(parts)
     return out
 
 
+def load_items_from_summary_json(path: Path, allowed_items: Sequence[str]) -> Dict[str, str]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    items = payload.get("items")
+    if not isinstance(items, dict):
+        return {}
+    allowed = {normalize_item_id(x) for x in allowed_items}
+    out: Dict[str, str] = {}
+    for key, value in items.items():
+        item_id = normalize_item_id(str(key))
+        if item_id not in allowed or not isinstance(value, dict):
+            continue
+        summary = str(value.get("summary") or "").strip()
+        if summary:
+            out[item_id] = summary
+    return out
+
+
 def save_npz(path: Path, mat: np.ndarray, ids: np.ndarray) -> None:
-    """Save matrix and aligned ids as compressed NPZ."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    ids_arr = np.asarray(ids, dtype=np.str_)
-    np.savez_compressed(path, mat=mat.astype(np.float32), ids=ids_arr)
+    np.savez_compressed(path, mat=mat.astype(np.float32), ids=np.asarray(ids, dtype=np.str_))
 
 
 def _faiss_gpu_available() -> bool:
-    if not _HAS_FAISS:
-        return False
     required = ("get_num_gpus", "index_cpu_to_all_gpus")
     if not all(hasattr(faiss, name) for name in required):
         return False
@@ -394,32 +341,6 @@ def _faiss_gpu_available() -> bool:
         return int(faiss.get_num_gpus()) > 0
     except Exception:
         return False
-
-
-def _system_gpu_present() -> bool:
-    try:
-        proc = subprocess.run(
-            ["nvidia-smi", "-L"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-        return proc.returncode == 0 and "GPU " in (proc.stdout or "")
-    except Exception:
-        return False
-
-
-def _warn_if_gpu_available_without_faiss_gpu(requested_gpu: bool) -> None:
-    if not requested_gpu:
-        return
-    if _faiss_gpu_available():
-        return
-    if _system_gpu_present():
-        print(
-            "[WARN] NVIDIA GPU detected, but FAISS GPU bindings are unavailable. "
-            "Install faiss-gpu to enable GPU acceleration. Continuing with CPU FAISS."
-        )
 
 
 def _faiss_to_cpu(index: "faiss.Index") -> "faiss.Index":
@@ -447,141 +368,137 @@ def build_faiss_index(mat: np.ndarray, use_gpu: bool = True) -> "faiss.Index":
 
 @dataclass
 class BuildConfig:
-    """Configuration for the full vector-db build pipeline."""
-
     filing_dir: Path
     out_dir: Path
     filing_type: str
     years: Optional[List[int]]
     scope: str
     items: List[str]
-    embedder: str
-    embed_model: Optional[str]
-    batch_size: int
+    embed_model: str
     tokenizer_model: str
-    chunk_tokens: int
-    overlap_tokens: int
+    chunk_tokens: Optional[int]
+    overlap_tokens: Optional[int]
     min_unit_tokens: int
     min_units_per_item: int
-    residual_norm_floor: float
-    cap_weight_percentile: float
-    build_faiss: bool
     faiss_use_gpu: bool
+    overwrite: bool
 
 
 def build(cfg: BuildConfig) -> None:
-    """
-    Execute full build pipeline.
-
-    Input:
-    - `cfg` controls paths, embedding backend, chunking, decomposition, and FAISS options.
-
-    Main outputs:
-    - `units/units_<YEAR>.parquet`
-    - `item_vectors/item_vectors_<YEAR>.parquet`
-    - pooled/residual `.npz` matrices per item-year
-    - optional FAISS index files per item-year
-    """
     if not cfg.filing_dir.exists():
         raise FileNotFoundError(f"Filing directory does not exist: {cfg.filing_dir}")
     if not cfg.filing_dir.is_dir():
         raise NotADirectoryError(f"Filing path is not a directory: {cfg.filing_dir}")
 
     scoped_out_dir = cfg.out_dir / f"scope={cfg.scope}"
+    if cfg.overwrite and scoped_out_dir.exists():
+        shutil.rmtree(scoped_out_dir)
     scoped_out_dir.mkdir(parents=True, exist_ok=True)
 
-    embedder, embed_model_name = make_embedder(cfg.embedder, cfg.embed_model, cfg.batch_size)
+    embedder = SentenceTransformerEmbedder(cfg.embed_model)
     token_counter = TokenCounter(model_name=cfg.tokenizer_model)
-    _warn_if_gpu_available_without_faiss_gpu(cfg.faiss_use_gpu)
     files = list_filing_files(cfg.filing_dir, cfg.filing_type, cfg.scope)
-
     if not files:
         raise RuntimeError(f"No source JSON filings found for scope={cfg.scope} under {cfg.filing_dir}")
 
     if cfg.years:
-        selected_years = set(int(y) for y in cfg.years)
+        selected = set(int(y) for y in cfg.years)
         filtered: List[Path] = []
         for path in files:
             try:
-                _, year = infer_firm_year_from_path(path, cfg.filing_dir)
+                _, year = infer_firm_year_from_path(path, cfg.filing_dir, cfg.filing_type)
             except ValueError:
                 continue
-            if year in selected_years:
+            if year in selected:
                 filtered.append(path)
         files = filtered
         if not files:
-            years_txt = ", ".join(str(y) for y in sorted(selected_years))
-            raise RuntimeError(
-                f"No source JSON filings found for selected year(s): {years_txt} "
-                f"(scope={cfg.scope}, filing={cfg.filing_type}, dir={cfg.filing_dir})"
-            )
+            raise RuntimeError(f"No source JSON filings found for selected years: {sorted(selected)}")
 
     units_rows: List[Dict[str, object]] = []
     item_rows: List[Dict[str, object]] = []
 
     for idx, path in enumerate(files, start=1):
         try:
-            firm_id, year = infer_firm_year_from_path(path, cfg.filing_dir)
+            firm_id, year = infer_firm_year_from_path(path, cfg.filing_dir, cfg.filing_type)
         except ValueError:
             continue
 
         if cfg.scope == "all":
             item_texts = load_items_from_json(path, cfg.items)
+        elif cfg.scope == "heading":
+            item_texts = load_items_from_struct_json(path, cfg.items)
         else:
-            item_texts = load_items_from_struct_json(path, cfg.items, cfg.scope)
+            item_texts = load_items_from_summary_json(path, cfg.items)
+
         if not item_texts:
             continue
 
-        for item_id, item_text in item_texts.items():
-            norm = canonicalize_text(item_text)
-            units = chunk_by_tokens(
-                norm,
-                token_counter,
-                cfg.chunk_tokens,
-                cfg.overlap_tokens,
-                cfg.min_unit_tokens,
-            )
-            units = [u for u in units if token_counter.count(u) >= cfg.min_unit_tokens]
-            if len(units) < cfg.min_units_per_item:
+        for item_id, raw_text in item_texts.items():
+            text = canonicalize_text(raw_text)
+            if not text:
                 continue
 
-            unit_vecs = embedder.embed_texts(units)
-            pooled, pool_stats = distinctiveness_weighted_pool(
-                unit_vecs,
-                eps=DEFAULT_WEIGHT_EPS,
-                cap_percentile=cfg.cap_weight_percentile,
-            )
-
-            for uid, unit_text in enumerate(units, start=1):
-                units_rows.append(
-                    {
-                        "firm_id": str(firm_id),
-                        "year": int(year),
-                        "item_id": item_id,
-                        "unit_id": uid,
-                        "unit_text": unit_text,
-                        "unit_tokens": token_counter.count(unit_text),
-                        "embedding_model": embed_model_name,
-                        "embedding": json.dumps(unit_vecs[uid - 1].astype(float).tolist()),
-                        "source_path": str(path),
-                        "scope": cfg.scope,
-                    }
+            if cfg.scope == "summary":
+                pooled = embedder.embed_texts([text])[0]
+                pooled = pooled.astype(np.float32)
+                pooled /= np.linalg.norm(pooled) + 1e-12
+                num_units = 1
+                item_tokens = token_counter.count(text)
+                chunk_tokens = None
+                overlap_tokens = None
+                w_max = 1.0
+                w_mean = 1.0
+            else:
+                chunk_tokens = resolve_chunk_tokens(item_id, cfg.chunk_tokens)
+                overlap_tokens = resolve_overlap_tokens(item_id, chunk_tokens, cfg.overlap_tokens)
+                units = chunk_by_tokens(
+                    text,
+                    token_counter,
+                    chunk_tokens,
+                    overlap_tokens,
+                    cfg.min_unit_tokens,
                 )
+                units = [unit for unit in units if token_counter.count(unit) >= cfg.min_unit_tokens]
+                if len(units) < cfg.min_units_per_item:
+                    continue
+                unit_vecs = embedder.embed_texts(units)
+                pooled, stats = distinctiveness_weighted_pool(unit_vecs)
+                num_units = len(units)
+                item_tokens = sum(token_counter.count(unit) for unit in units)
+                w_max = stats["w_max"]
+                w_mean = stats["w_mean"]
+                for unit_id, unit_text in enumerate(units, start=1):
+                    units_rows.append(
+                        {
+                            "firm_id": str(firm_id),
+                            "year": int(year),
+                            "item_id": item_id,
+                            "unit_id": unit_id,
+                            "unit_text": unit_text,
+                            "unit_tokens": token_counter.count(unit_text),
+                            "embedding_model": cfg.embed_model,
+                            "source_path": str(path),
+                            "scope": cfg.scope,
+                            "chunk_tokens": chunk_tokens,
+                            "overlap_tokens": overlap_tokens,
+                        }
+                    )
 
             item_rows.append(
                 {
                     "firm_id": str(firm_id),
                     "year": int(year),
                     "item_id": item_id,
-                    "num_units": len(units),
-                    "item_tokens": sum(token_counter.count(u) for u in units),
-                    "embedding_model": embed_model_name,
+                    "embedding_model": cfg.embed_model,
+                    "num_units": num_units,
+                    "item_tokens": item_tokens,
                     "pooled_embedding": json.dumps(pooled.astype(float).tolist()),
-                    "w_max": pool_stats["w_max"],
-                    "w_mean": pool_stats["w_mean"],
-                    "common_loading": np.nan,
-                    "residual_norm": np.nan,
-                    "residual_embedding": None,
+                    "chunk_tokens": chunk_tokens,
+                    "overlap_tokens": overlap_tokens,
+                    "w_max": w_max,
+                    "w_mean": w_mean,
+                    "source_path": str(path),
                     "scope": cfg.scope,
                 }
             )
@@ -589,19 +506,18 @@ def build(cfg: BuildConfig) -> None:
         if idx % 100 == 0:
             print(f"[INFO] Processed {idx}/{len(files)} files")
 
-    units_df = pd.DataFrame(units_rows)
     items_df = pd.DataFrame(item_rows)
-    if units_df.empty or items_df.empty:
-        raise RuntimeError("No units/items built. Check filing directory and item parser.")
+    if items_df.empty:
+        raise RuntimeError("No item vectors built. Check source files and selected items.")
 
+    units_df = pd.DataFrame(units_rows)
     items_df["_row_idx"] = np.arange(len(items_df))
 
-    for item_id, year in sorted(set((r["item_id"], int(r["year"])) for _, r in items_df.iterrows())):
+    for item_id, year in sorted(set((row["item_id"], int(row["year"])) for _, row in items_df.iterrows())):
         sub = items_df[(items_df["item_id"] == item_id) & (items_df["year"] == year)]
         idxs = sub["_row_idx"].to_numpy()
         if len(idxs) == 0:
             continue
-
         mat = np.stack(
             [
                 np.array(json.loads(items_df.loc[items_df["_row_idx"] == rid, "pooled_embedding"].values[0]), dtype=np.float32)
@@ -610,167 +526,110 @@ def build(cfg: BuildConfig) -> None:
             axis=0,
         )
         mat /= np.linalg.norm(mat, axis=1, keepdims=True) + 1e-12
-
-        sum_all = mat.sum(axis=0)
-        alphas: List[float] = []
-        residuals: List[Optional[np.ndarray]] = []
-        residual_norms: List[float] = []
-
-        for i in range(len(mat)):
-            v = mat[i]
-            if len(mat) == 1:
-                direction = v
-            else:
-                loo = (sum_all - v) / (len(mat) - 1)
-                direction = loo / (np.linalg.norm(loo) + 1e-12)
-
-            alpha, residual, rnorm = orthogonal_decompose(v, direction)
-            alphas.append(alpha)
-            residual_norms.append(rnorm)
-            residuals.append(None if rnorm < cfg.residual_norm_floor else residual / (rnorm + 1e-12))
-
-        sub_idx = sub.index.to_numpy()
-        items_df.loc[sub_idx, "common_loading"] = np.array(alphas, dtype=float)
-        items_df.loc[sub_idx, "residual_norm"] = np.array(residual_norms, dtype=float)
-        items_df.loc[sub_idx, "residual_embedding"] = [
-            None if residuals[i] is None else json.dumps(residuals[i].astype(float).tolist())
-            for i in range(len(residuals))
-        ]
-
         firm_ids = sub["firm_id"].astype(str).to_numpy()
 
         pooled_path = scoped_out_dir / "vectors" / "pooled" / f"item={item_id}" / f"year={year}.npz"
         save_npz(pooled_path, mat, firm_ids)
 
-        residual_mat = np.zeros_like(mat)
-        residual_mask = np.zeros((len(residuals),), dtype=np.int8)
-        for i, rv in enumerate(residuals):
-            if rv is None:
-                continue
-            residual_mat[i] = rv
-            residual_mask[i] = 1
+        index_dir = scoped_out_dir / "indices" / f"item={item_id}" / f"year={year}"
+        index_dir.mkdir(parents=True, exist_ok=True)
+        index = build_faiss_index(mat, use_gpu=cfg.faiss_use_gpu)
+        faiss.write_index(_faiss_to_cpu(index), str(index_dir / "pooled.faiss"))
+        (index_dir / "pooled_ids.json").write_text(json.dumps(firm_ids.tolist()), encoding="utf-8")
 
-        residual_path = scoped_out_dir / "vectors" / "residual" / f"item={item_id}" / f"year={year}.npz"
-        residual_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(
-            residual_path,
-            mat=residual_mat.astype(np.float32),
-            ids=np.asarray(firm_ids, dtype=np.str_),
-            mask=residual_mask.astype(np.int8),
-        )
-
-        if cfg.build_faiss:
-            if not _HAS_FAISS:
-                raise RuntimeError("FAISS index build requested but faiss is not installed.")
-            idx_dir = scoped_out_dir / "indices" / f"item={item_id}" / f"year={year}"
-            idx_dir.mkdir(parents=True, exist_ok=True)
-
-            pooled_index = build_faiss_index(mat, use_gpu=cfg.faiss_use_gpu)
-            faiss.write_index(_faiss_to_cpu(pooled_index), str(idx_dir / "pooled.faiss"))
-            (idx_dir / "pooled_ids.json").write_text(json.dumps(firm_ids.tolist()), encoding="utf-8")
-
-            valid = residual_mask.astype(bool)
-            if valid.sum() > 0:
-                residual_index = build_faiss_index(residual_mat[valid], use_gpu=cfg.faiss_use_gpu)
-                faiss.write_index(_faiss_to_cpu(residual_index), str(idx_dir / "residual.faiss"))
-                (idx_dir / "residual_ids.json").write_text(json.dumps(firm_ids[valid].tolist()), encoding="utf-8")
-
-    units_dir = scoped_out_dir / "units"
-    item_vectors_dir = scoped_out_dir / "item_vectors"
-    units_dir.mkdir(parents=True, exist_ok=True)
-    item_vectors_dir.mkdir(parents=True, exist_ok=True)
-
+    items_dir = scoped_out_dir / "item_vectors"
+    items_dir.mkdir(parents=True, exist_ok=True)
     items_noidx = items_df.drop(columns=["_row_idx"])
-    out_years = sorted(set(int(y) for y in items_noidx["year"].tolist()))
-    for y in out_years:
-        units_out = units_dir / f"units_{y}.parquet"
-        items_out = item_vectors_dir / f"item_vectors_{y}.parquet"
-        units_df[units_df["year"] == y].to_parquet(units_out, index=False)
-        items_noidx[items_noidx["year"] == y].to_parquet(items_out, index=False)
-        print(f"[DONE] Wrote: {units_out}")
-        print(f"[DONE] Wrote: {items_out}")
+    for year in sorted(set(int(y) for y in items_noidx["year"].tolist())):
+        out_path = items_dir / f"item_vectors_{year}.parquet"
+        items_noidx[items_noidx["year"] == year].to_parquet(out_path, index=False)
+        print(f"[DONE] Wrote: {out_path}")
+
+    if not units_df.empty:
+        units_dir = scoped_out_dir / "units"
+        units_dir.mkdir(parents=True, exist_ok=True)
+        for year in sorted(set(int(y) for y in units_df["year"].tolist())):
+            out_path = units_dir / f"units_{year}.parquet"
+            units_df[units_df["year"] == year].to_parquet(out_path, index=False)
+            print(f"[DONE] Wrote: {out_path}")
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Build vector DB for item-level peer matching")
-    ap.add_argument(
-        "--filing_dir",
-        default="sec_filings",
-        help="Root directory containing extracted filing JSON files (default: sec_filings)",
-    )
-    ap.add_argument("--out_dir", required=True, help="Output directory")
-    ap.add_argument("--filing", default="10-K", choices=["10-K", "10-Q"], dest="filing_type")
-    ap.add_argument(
+    parser = argparse.ArgumentParser(description="Build local FAISS vector artifacts for item peer matching")
+    parser.add_argument("--filing_dir", default="sec_filings", help="Root directory of extracted filing JSON")
+    parser.add_argument("--out_dir", required=True, help="Output directory for vector artifacts")
+    parser.add_argument("--filing", default="10-K", choices=["10-K", "10-Q"], dest="filing_type")
+    parser.add_argument(
         "--year",
         "--years",
         type=int,
         nargs="+",
         default=None,
         dest="years",
-        help="Optional year filter. Default is all years under --filing_dir. Example: --year 2012 2013",
+        help="Optional year filter. Example: --year 2022 2023",
     )
-    ap.add_argument(
+    parser.add_argument(
         "--scope",
         default="all",
-        choices=["heading", "body", "all"],
-        help="Text scope: all uses *_item.json text_content; heading/body use *_str.json structures.",
+        choices=["heading", "all", "summary"],
+        help="Vector scope: raw item text, extracted headings, or local summaries.",
     )
-    ap.add_argument("--items", default=",".join(DEFAULT_ITEMS), help="Comma-separated item ids")
-
-    ap.add_argument("--embedder", default="local", choices=["openai", "local"], help="Embedding backend")
-    ap.add_argument(
+    parser.add_argument("--items", default=",".join(DEFAULT_ITEMS), help="Comma-separated item ids")
+    parser.add_argument(
         "--embed_model",
-        default=None,
-        help="OpenAI embedding model (required only when --embedder openai)",
+        default=DEFAULT_EMBED_MODEL,
+        help="Local embedding model name. Default is BAAI/bge-m3.",
     )
-    ap.add_argument("--batch_size", type=int, default=64, help="Embedding batch size")
-    ap.add_argument(
+    parser.add_argument(
         "--tokenizer-model",
         default="gpt-4o-mini",
-        help="Tokenizer model for token counting (uses tiktoken when available)",
+        help="Tokenizer used only for chunk sizing heuristics.",
     )
-
-    ap.add_argument("--chunk_tokens", type=int, default=280)
-    ap.add_argument("--overlap_tokens", type=int, default=60)
-    ap.add_argument("--min_unit_tokens", type=int, default=80)
-    ap.add_argument("--min_units_per_item", type=int, default=3)
-
-    ap.add_argument("--residual_norm_floor", type=float, default=0.10)
-    ap.add_argument("--cap_weight_percentile", type=float, default=95.0)
-    ap.add_argument("--build-faiss", dest="build_faiss", action="store_true", default=True)
-    ap.add_argument("--no-build-faiss", dest="build_faiss", action="store_false")
-    ap.add_argument(
+    parser.add_argument(
+        "--chunk_tokens",
+        type=int,
+        default=None,
+        help="Optional global chunk size override. Default is item-specific auto sizing.",
+    )
+    parser.add_argument(
+        "--overlap_tokens",
+        type=int,
+        default=None,
+        help="Optional global overlap override. Default auto-scales with chunk size.",
+    )
+    parser.add_argument("--min_unit_tokens", type=int, default=80, help="Minimum tokens for one chunk")
+    parser.add_argument("--min_units_per_item", type=int, default=3, help="Minimum chunk count for pooled items")
+    parser.add_argument(
         "--faiss-gpu",
         dest="faiss_use_gpu",
         action="store_true",
         default=True,
-        help="Use FAISS GPU acceleration when available (default: on)",
+        help="Use FAISS GPU acceleration when available (default: on).",
     )
-    ap.add_argument("--no-faiss-gpu", dest="faiss_use_gpu", action="store_false")
-
-    args = ap.parse_args()
+    parser.add_argument("--no-faiss-gpu", dest="faiss_use_gpu", action="store_false")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Remove and rebuild the target scope directory before writing outputs.",
+    )
+    args = parser.parse_args()
 
     cfg = BuildConfig(
         filing_dir=Path(args.filing_dir),
         out_dir=Path(args.out_dir),
-        filing_type=args.filing_type,
+        filing_type=str(args.filing_type),
         years=None if not args.years else sorted({int(y) for y in args.years}),
         scope=str(args.scope),
-        items=[normalize_item_id(i) for i in args.items.split(",") if i.strip()],
-        embedder=args.embedder,
-        embed_model=str(args.embed_model) if args.embed_model else None,
-        batch_size=int(args.batch_size),
+        items=[normalize_item_id(x) for x in str(args.items).split(",") if x.strip()],
+        embed_model=str(args.embed_model),
         tokenizer_model=str(args.tokenizer_model),
-        chunk_tokens=int(args.chunk_tokens),
-        overlap_tokens=int(args.overlap_tokens),
+        chunk_tokens=None if args.chunk_tokens is None else int(args.chunk_tokens),
+        overlap_tokens=None if args.overlap_tokens is None else int(args.overlap_tokens),
         min_unit_tokens=int(args.min_unit_tokens),
         min_units_per_item=int(args.min_units_per_item),
-        residual_norm_floor=float(args.residual_norm_floor),
-        cap_weight_percentile=float(args.cap_weight_percentile),
-        build_faiss=bool(args.build_faiss),
         faiss_use_gpu=bool(args.faiss_use_gpu),
+        overwrite=bool(args.overwrite),
     )
-
     build(cfg)
 
 

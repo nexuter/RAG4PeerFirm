@@ -1,27 +1,26 @@
 # RAG4PeerFirm
 
-Pipeline for SEC filing download, item extraction, vector building, and peer-firm matching.
+Local pipeline for SEC item extraction, item summarization, vector building, peer-firm retrieval, LLM reranking, and evaluation.
 
-## Modules
+## Workflow
 
-- `script/downloader.py`
-  - Downloads SEC filings using ticker/CIK filters into `sec_filings/`.
+1. Extract filing items into `*_item.json` and `*_str.json`.
+2. Run `script/summrizer.py` to create sibling `*_item_summ.json` summaries.
+3. Run `script/vdbbuilder.py` for `all`, `heading`, or `summary` scope.
+4. Run `script/peerfinder.py` to retrieve top 10% by cosine and rerank to top 1%.
+5. Run `script/evaluate.py` with optional metadata and analyst peer labels.
+
+## Scripts
+
+- `script/summrizer.py`
+  - Local Ollama summarizer with map-reduce and previous-year context.
 - `script/vdbbuilder.py`
-  - Builds unit and item embeddings from extracted filing JSON (`*_item.json` or `*_str.json` by scope).
-  - Produces pooled/residual vectors and optional FAISS indices.
+  - Local embedding build with FAISS indices.
+  - One pooled vector per `(firm, year, item)` for every scope.
 - `script/peerfinder.py`
-  - Finds item-level peers for a focal firm and year.
-  - Supports `orthogonal`, `cosine`, and `llama3` similarity methods.
-  - Supports cached precomputed NxN similarity matrices.
-
-## Input Data Assumptions
-
-- Input format is JSON-only from extracted filing outputs.
-- Expected location pattern:
-  - `sec_filings/<firm_id>/<year>/<filing_type>/<firm_id>_<year>_<filing>_item.json`
-- Expected JSON keys:
-  - `toc_items`
-  - `items[item_id].text_content` (fallback to `html_content`)
+  - Cosine retrieval plus local LLM reranking on retrieved item text.
+- `script/evaluate.py`
+  - Weak-label evaluation with `Recall@50`, `NDCG@10`, and year-over-year stability.
 
 ## Install
 
@@ -29,193 +28,34 @@ Pipeline for SEC filing download, item extraction, vector building, and peer-fir
 pip install -r requirements.txt
 ```
 
-## Testing
+## Example
 
-Run integration tests:
-
-```bash
-python -m pytest tests/test_integration_pipeline.py
-```
-
-Run only vdbbuilder coverage:
+Summarize:
 
 ```bash
-python -m pytest tests/test_integration_pipeline.py -k vdbbuilder
+python script/summrizer.py --filing_dir sec_filings --filing 10-K --year 2024 --llm llama3.2:3b
 ```
 
-Optional local marker registration (to suppress `PytestUnknownMarkWarning` for `integration`):
-
-```ini
-# pytest.ini (local file)
-[pytest]
-markers =
-    integration: integration tests for end-to-end pipeline behavior
-```
-
-## 1) Download Filings
+Build vectors:
 
 ```bash
-python script/downloader.py \
-  --filing 10k \
-  --year 2024 \
-  --output_dir sec_filings \
-  --user_agent "RAG4PeerFirm/1.0 (your-email@example.com)"
+python script/vdbbuilder.py --filing_dir sec_filings --out_dir vector_db --filing 10-K --year 2024 --scope summary
 ```
 
-Examples:
-
-```bash
-python script/downloader.py --filing 10k --year 2024 --ticker AAPL MSFT --output_dir sec_filings --user_agent "RAG4PeerFirm/1.0 (your-email@example.com)"
-python script/downloader.py --filing 10k --year 2024 --cik 0000320193 0000789019 --output_dir sec_filings --user_agent "RAG4PeerFirm/1.0 (your-email@example.com)"
-```
-
-## 2) Build Vector DB
-
-Default local embedder (deterministic and offline):
-
-```bash
-python script/vdbbuilder.py \
-  --filing_dir sec_filings \
-  --out_dir vector_db \
-  --filing 10-K \
-  --year 2024 \
-  --scope all \
-  --embedder local
-```
-
-OpenAI embedder:
-
-```bash
-set OPENAI_API_KEY=...
-python script/vdbbuilder.py \
-  --filing_dir sec_filings \
-  --out_dir vector_db \
-  --filing 10-K \
-  --year 2024 \
-  --scope all \
-  --embedder openai \
-  --embed_model text-embedding-3-large
-```
-
-Scope options:
-
-- `--scope all`: use `*_item.json` and `items[item_id].text_content` (existing behavior)
-- `--scope heading`: use `*_str.json` and concatenate all `heading` values in each item structure
-- `--scope body`: use `*_str.json` and concatenate all `body` values in each item structure
-- `--year` (optional): one or more years to build
-  - default: build all years found under `--filing_dir`
-  - example: `--year 2012 2013`
-
-Scope-specific outputs are written under:
-
-- `vector_db/scope=<scope>/...`
-
-Optional flags:
-
-```bash
-python script/vdbbuilder.py --out_dir vector_db --embedder local --no-build-faiss
-python script/vdbbuilder.py --out_dir vector_db --embedder local --no-faiss-gpu
-```
-
-Main outputs:
-
-- `vector_db/scope=<scope>/units/units_<YEAR>.parquet`
-- `vector_db/scope=<scope>/item_vectors/item_vectors_<YEAR>.parquet`
-- `vector_db/scope=<scope>/vectors/pooled/item=<ITEM>/year=<YEAR>.npz`
-- `vector_db/scope=<scope>/vectors/residual/item=<ITEM>/year=<YEAR>.npz`
-- `vector_db/scope=<scope>/indices/item=<ITEM>/year=<YEAR>/...` (if FAISS build is enabled)
-
-Error behavior:
-
-- errors if `--filing_dir` does not exist
-- errors if `--filing_dir` exists but has no matching source JSON for selected scope/filing
-- errors if selected `--year` values have no matching filings
-
-## 3) Find Peers
-
-Orthogonal method:
+Find peers:
 
 ```bash
 python script/peerfinder.py \
   --vdb_dir vector_db \
-  --scope all \
+  --scope summary \
   --focalfirm 0000320193 \
   --year 2024 \
-  --item 1A \
-  --method orthogonal \
-  --k 20 \
-  --q_share 0.20 \
-  --out_path output/peer_sets.csv.gz
+  --item 1A 7 7A \
+  --model llama3.2:8b
 ```
 
-Pairwise cosine method:
+Evaluate:
 
 ```bash
-python script/peerfinder.py \
-  --vdb_dir vector_db \
-  --scope all \
-  --focalfirm 0000320193 \
-  --year 2024 \
-  --item 1A \
-  --method cosine \
-  --k 20
+python script/evaluate.py --peer_path output/peer_sets_20240101_120000.csv --metadata_path firm_metadata.csv
 ```
-
-Multiple items:
-
-```bash
-python script/peerfinder.py --vdb_dir vector_db --scope all --focalfirm 0000320193 --year 2024 --item 1A 7 7A --method orthogonal
-```
-
-Llama3 text-comparison method (uses item text from `units.parquet`):
-
-```bash
-python script/peerfinder.py \
-  --vdb_dir vector_db \
-  --scope all \
-  --focalfirm 0000320193 \
-  --year 2024 \
-  --item 1A \
-  --method llama3 \
-  --llama-base-url http://localhost:8321/v1 \
-  --llama-model llama3.3-70b \
-  --k 20
-```
-
-Llama3 controls:
-
-- `--llama-base-url` (default `http://localhost:8321/v1`)
-- `--llama-model` (default `llama3.3-70b`)
-- `--llama-max-chars` (default `12000`)
-- `--llama-timeout-sec` (default `120`)
-
-## Precompute Similarity Matrix Cache
-
-Build and save NxN similarity matrix per `(item, year, method)`:
-
-```bash
-python script/peerfinder.py \
-  --vdb_dir vector_db \
-  --focalfirm 0000320193 \
-  --year 2024 \
-  --item 1A \
-  --method orthogonal \
-  --precompute
-```
-
-Force rebuild:
-
-```bash
-python script/peerfinder.py --vdb_dir vector_db --focalfirm 0000320193 --year 2024 --item 1A --method orthogonal --precompute --precompute-overwrite
-```
-
-Cache behavior:
-
-- If table exists, `peerfinder` uses it first.
-- If table does not exist, `peerfinder` computes on demand.
-- If `--precompute` is passed, missing table is created and then used.
-
-Cache paths:
-
-- `vector_db/scope=<scope>/precomputed/scope=<scope>/item=<ITEM>/year=<YEAR>/method=<METHOD>/similarity.npy`
-- `vector_db/scope=<scope>/precomputed/scope=<scope>/item=<ITEM>/year=<YEAR>/method=<METHOD>/firm_ids.json`

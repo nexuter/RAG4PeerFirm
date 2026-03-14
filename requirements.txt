@@ -4,7 +4,7 @@ lxml>=4.9.0
 numpy>=1.24.0
 pandas>=2.2.0
 pyarrow>=14.0.0
+sentence-transformers>=3.0.0
 # Baseline FAISS package. For GPU acceleration, install faiss-gpu in your env.
 faiss-cpu>=1.7.4
-openai>=1.40.0
 tiktoken>=0.12.0
